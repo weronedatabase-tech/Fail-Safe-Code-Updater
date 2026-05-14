@@ -1,117 +1,266 @@
 // ==========================================
-// Isolated Client-Side GitHub Committer
+// Isolated Client-Side GitHub & Drive Updater
 // ==========================================
 
-document.getElementById('updater-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
+// --- UTILITY LOGIC ---
+const statusMsg = document.getElementById('status-message');
+
+function setStatus(msg, type = 'info') {
+    statusMsg.textContent = msg;
+    statusMsg.classList.remove('hidden', 'bg-red-900/50', 'text-red-400', 'border-red-800', 'bg-green-900/50', 'text-green-400', 'border-green-800', 'bg-blue-900/50', 'text-blue-400', 'border-blue-800');
     
+    if (type === 'error') {
+        statusMsg.classList.add('bg-red-900/50', 'text-red-400', 'border', 'border-red-800');
+    } else if (type === 'success') {
+        statusMsg.classList.add('bg-green-900/50', 'text-green-400', 'border', 'border-green-800');
+    } else {
+        statusMsg.classList.add('bg-blue-900/50', 'text-blue-400', 'border', 'border-blue-800');
+    }
+}
+
+function getConfig() {
     const repo = document.getElementById('gh-repo').value.trim();
     const branch = document.getElementById('gh-branch').value.trim();
     const token = document.getElementById('gh-token').value.trim();
-    const payload = document.getElementById('gh-payload').value.trim();
+    const gasUrl = document.getElementById('gas-url').value.trim();
+    let folderInput = document.getElementById('gh-drive-folder').value.trim();
     
+    if (!repo || !branch || !token || !gasUrl || !folderInput) {
+        throw new Error("All configuration fields in Step 1 are required.");
+    }
+
+    let folderId = folderInput;
+    if (folderInput.includes('drive.google.com')) { 
+        const match = folderInput.match(/folders\/([a-zA-Z0-9_-]+)/); 
+        if (match) folderId = match[1]; 
+    }
+
+    return { repo, branch, token, gasUrl, folderId };
+}
+
+async function gasCall(gasUrl, payload) {
+    const res = await fetch(gasUrl, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.error) throw new Error("GAS Error: " + data.error);
+    return data;
+}
+
+// --- GITHUB API LOGIC ---
+async function fetchAllRepoFiles(repo, branch, token) {
+    const headers = { "Authorization": `Bearer ${token}` };
+    const treeRes = await fetch(`https://api.github.com/repos/${repo}/git/trees/${branch}?recursive=1`, { headers });
+    if (!treeRes.ok) throw new Error(`GitHub API Error: Could not fetch tree for branch '${branch}'.`);
+    
+    const treeData = await treeRes.json();
+    // Replicate previous backup logic: exclude updater dir and ensure it's a blob
+    const fileNodes = treeData.tree.filter(item => item.type === 'blob' && !item.path.startsWith('updater/'));
+    
+    let compiledFiles = [];
+    const batchSize = 10; // Batch fetch to avoid rate limit spikes
+    
+    for (let i = 0; i < fileNodes.length; i += batchSize) {
+        const batch = fileNodes.slice(i, i + batchSize);
+        const promises = batch.map(async file => {
+            const contentRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${file.sha}`, {
+                headers: { ...headers, "Accept": "application/vnd.github.v3.raw" }
+            });
+            if (!contentRes.ok) throw new Error(`Failed to fetch raw blob for ${file.path}`);
+            return { path: file.path, content: await contentRes.text() };
+        });
+        compiledFiles.push(...(await Promise.all(promises)));
+    }
+    
+    return { fileNodes, compiledFiles };
+}
+
+async function pushCommitToGitHub(repo, branch, token, files, commitMessage) {
+    const headers = { 
+        "Authorization": `Bearer ${token}`, 
+        "Accept": "application/vnd.github.v3+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type": "application/json"
+    };
+    const baseUrl = `https://api.github.com/repos/${repo}`;
+
+    // A. Get current branch reference
+    let res = await fetch(`${baseUrl}/git/refs/heads/${branch}`, { headers });
+    if (!res.ok) throw new Error(`GitHub API Error: Could not find branch '${branch}'.`);
+    const commitSha = (await res.json()).object.sha;
+
+    // B. Get the commit object to find base tree
+    res = await fetch(`${baseUrl}/git/commits/${commitSha}`, { headers });
+    const baseTreeSha = (await res.json()).tree.sha;
+
+    // C. Create a new tree
+    const treeNodes = files.map(f => ({
+        path: f.path, mode: "100644", type: "blob", content: f.content
+    }));
+
+    res = await fetch(`${baseUrl}/git/trees`, {
+        method: "POST", headers,
+        body: JSON.stringify({ base_tree: baseTreeSha, tree: treeNodes })
+    });
+    if (!res.ok) throw new Error("GitHub API Error: Failed to construct Git Tree.");
+    const newTreeSha = (await res.json()).sha;
+
+    // D. Create new commit
+    res = await fetch(`${baseUrl}/git/commits`, {
+        method: "POST", headers,
+        body: JSON.stringify({ message: commitMessage, tree: newTreeSha, parents: [commitSha] })
+    });
+    if (!res.ok) throw new Error("GitHub API Error: Failed to create Commit.");
+    const newCommitSha = (await res.json()).sha;
+
+    // E. Fast-forward branch
+    res = await fetch(`${baseUrl}/git/refs/heads/${branch}`, {
+        method: "PATCH", headers, body: JSON.stringify({ sha: newCommitSha })
+    });
+    if (!res.ok) throw new Error("GitHub API Error: Failed to update branch reference.");
+}
+
+// --- CORE ACTIONS ---
+
+// 1. UPDATE PUSH FLOW
+document.getElementById('updater-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const payloadInput = document.getElementById('gh-payload').value.trim();
     const btnText = document.getElementById('btn-text');
     const btnSpinner = document.getElementById('btn-spinner');
     const submitBtn = document.getElementById('submit-btn');
-    const statusMsg = document.getElementById('status-message');
-    
-    const setStatus = (msg, isError = false) => {
-        statusMsg.textContent = msg;
-        statusMsg.className = `mb-3 p-3 rounded-lg text-sm font-semibold text-center ${isError ? 'bg-red-900/50 text-red-400 border border-red-800' : 'bg-green-900/50 text-green-400 border border-green-800'}`;
-        statusMsg.classList.remove('hidden');
-    };
-
-    submitBtn.disabled = true;
-    btnText.textContent = "Processing...";
-    btnSpinner.classList.remove('hidden');
-    statusMsg.classList.add('hidden');
 
     try {
-        // 1. Parse the AI Payload using the exact Regex pattern
-        const files =[];
+        const config = getConfig();
+        
+        // Parse AI Payload early to fail fast if invalid
+        const files = [];
         const fileRegex = /\$\$\$\s*FILE:\s*([^\$]+)\s*\$\$\$\s*```javascript([\s\S]*?)```/g;
         let match;
+        while ((match = fileRegex.exec(payloadInput)) !== null) {
+            files.push({ path: match[1].trim(), content: match[2].trim() });
+        }
+        if (files.length === 0) throw new Error("No valid files parsed. Ensure you copied the exact format ($$$ FILE: path $$$ followed by ```javascript code block).");
+
+        submitBtn.disabled = true;
+        btnSpinner.classList.remove('hidden');
         
-        while ((match = fileRegex.exec(payload)) !== null) {
-            files.push({
-                path: match[1].trim(),
-                content: match[2].trim()
-            });
-        }
-
-        if (files.length === 0) {
-            throw new Error("No files parsed. Ensure you copied the exact format ($$$ FILE: path $$$ followed by ```javascript code block).");
-        }
-
-        btnText.textContent = "Pushing to GitHub API...";
-
-        // 2. Client-side direct GitHub API configuration
-        const headers = { 
-            "Authorization": `Bearer ${token}`, 
-            "Accept": "application/vnd.github.v3+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "Content-Type": "application/json"
-        };
-        const baseUrl = `https://api.github.com/repos/${repo}`;
-
-        // Step A: Get current branch reference to find the latest commit
-        let res = await fetch(`${baseUrl}/git/refs/heads/${branch}`, { headers });
-        if (!res.ok) throw new Error(`GitHub API Error: Could not find branch '${branch}'. Verify repo and token.`);
-        const refData = await res.json();
-        const commitSha = refData.object.sha;
-
-        // Step B: Get the commit object to find the base tree
-        res = await fetch(`${baseUrl}/git/commits/${commitSha}`, { headers });
-        const commitData = await res.json();
-        const baseTreeSha = commitData.tree.sha;
-
-        // Step C: Create a new tree with the updated files
-        const treeNodes = files.map(f => ({
-            path: f.path,
-            mode: "100644",
-            type: "blob",
-            content: f.content
-        }));
-
-        res = await fetch(`${baseUrl}/git/trees`, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({ base_tree: baseTreeSha, tree: treeNodes })
+        // Step 1: Perform Backup
+        btnText.textContent = "Step 1/2: Backing up repo...";
+        setStatus("Fetching full repository tree to create a Drive backup...", "info");
+        
+        const { fileNodes, compiledFiles } = await fetchAllRepoFiles(config.repo, config.branch, config.token);
+        const hierarchy = fileNodes.map(f => f.path).join('\n');
+        
+        const backupData = await gasCall(config.gasUrl, {
+            action: 'backupCode', folderId: config.folderId, hierarchy, files: compiledFiles
         });
-        if (!res.ok) throw new Error("GitHub API Error: Failed to construct Git Tree.");
-        const treeData = await res.json();
-        const newTreeSha = treeData.sha;
 
-        // Step D: Create a new commit object
-        res = await fetch(`${baseUrl}/git/commits`, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-                message: "Automated emergency update via Fail-Safe Client Updater",
-                tree: newTreeSha,
-                parents: [commitSha]
-            })
-        });
-        if (!res.ok) throw new Error("GitHub API Error: Failed to create Commit.");
-        const newCommitData = await res.json();
-        const newCommitSha = newCommitData.sha;
+        // Step 2: Push Update
+        btnText.textContent = "Step 2/2: Pushing Update...";
+        setStatus(`Backup successful! (${backupData.url}). Pushing new code to GitHub...`, "info");
 
-        // Step E: Fast-forward the branch reference to the new commit
-        res = await fetch(`${baseUrl}/git/refs/heads/${branch}`, {
-            method: "PATCH",
-            headers,
-            body: JSON.stringify({ sha: newCommitSha })
-        });
-        if (!res.ok) throw new Error("GitHub API Error: Failed to update branch reference.");
+        await pushCommitToGitHub(config.repo, config.branch, config.token, files, "Automated emergency update & backup via Fail-Safe Client");
 
-        setStatus(`Success! Pushed ${files.length} files. GitHub Actions is deploying...`);
+        setStatus(`Success! Pushed ${files.length} updated files. Action triggers deployed.`, "success");
         document.getElementById('gh-payload').value = '';
 
     } catch (err) {
-        setStatus(err.message, true);
+        setStatus(err.message, "error");
     } finally {
         submitBtn.disabled = false;
-        btnText.textContent = "Push Code to GitHub";
+        btnText.textContent = "Backup Repo & Push Code";
         btnSpinner.classList.add('hidden');
+    }
+});
+
+// 2. LOAD BACKUPS FLOW
+document.getElementById('load-backups-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('load-backups-btn');
+    const btnText = document.getElementById('load-btn-text');
+    const btnSpinner = document.getElementById('load-btn-spinner');
+    const rbContainer = document.getElementById('rollback-container');
+    const select = document.getElementById('rollback-select');
+
+    try {
+        const config = getConfig();
+        btn.disabled = true;
+        btnSpinner.classList.remove('hidden');
+        btnText.textContent = "Fetching Backups...";
+        setStatus("Scanning Drive folder for backups...", "info");
+
+        const data = await gasCall(config.gasUrl, { action: 'getBackups', folderId: config.folderId });
+        
+        if (!data.backups || data.backups.length === 0) {
+            throw new Error("No compatible backups found in the specified Drive folder.");
+        }
+
+        select.innerHTML = '';
+        data.backups.forEach(b => {
+            const dateStr = new Date(b.time).toLocaleString();
+            const option = document.createElement('option');
+            option.value = b.id;
+            option.textContent = `${dateStr} - ${b.name}`;
+            select.appendChild(option);
+        });
+
+        rbContainer.classList.remove('hidden');
+        setStatus(`Loaded ${data.backups.length} backups. Select one and perform rollback.`, "success");
+
+    } catch(err) {
+        setStatus(err.message, "error");
+    } finally {
+        btn.disabled = false;
+        btnSpinner.classList.add('hidden');
+        btnText.textContent = "Refresh Available Backups";
+    }
+});
+
+// 3. EXECUTE ROLLBACK FLOW
+document.getElementById('rollback-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('rollback-btn');
+    const btnText = document.getElementById('rb-btn-text');
+    const btnSpinner = document.getElementById('rb-btn-spinner');
+    const select = document.getElementById('rollback-select');
+    const fileId = select.value;
+
+    if (!confirm("Are you absolutely sure you want to rollback the repository to this specific version? This will push the backup contents over your current files.")) return;
+
+    try {
+        const config = getConfig();
+        btn.disabled = true;
+        btnSpinner.classList.remove('hidden');
+        btnText.textContent = "Retrieving Document...";
+        setStatus("Fetching backup document contents from Google Drive...", "info");
+
+        const data = await gasCall(config.gasUrl, { action: 'getBackupContent', fileId });
+        
+        btnText.textContent = "Pushing Rollback...";
+        setStatus("Parsing document and executing rollback over GitHub API...", "info");
+
+        const files = [];
+        const fileRegex = /\$\$\$\s*FILE:\s*([^\$]+)\s*\$\$\$\s*```javascript([\s\S]*?)```/g;
+        let match;
+        while ((match = fileRegex.exec(data.content)) !== null) {
+            files.push({ path: match[1].trim(), content: match[2].trim() });
+        }
+        
+        if (files.length === 0) throw new Error("Could not parse files from the backup document. Document may be malformed.");
+
+        await pushCommitToGitHub(config.repo, config.branch, config.token, files, "Emergency Repository Rollback via Fail-Safe Client");
+
+        setStatus(`Rollback Successful! Restored ${files.length} files to the selected state.`, "success");
+        document.getElementById('rollback-container').classList.add('hidden');
+
+    } catch(err) {
+        setStatus(err.message, "error");
+    } finally {
+        btn.disabled = false;
+        btnSpinner.classList.add('hidden');
+        btnText.textContent = "Perform Rollback";
     }
 });
