@@ -204,7 +204,7 @@ async function pushCommitToGitHub(repo, branch, token, files, commitMessage) {
         method: "POST", headers,
         body: JSON.stringify({ base_tree: baseTreeSha, tree: treeNodes })
     });
-    if (!res.ok) throw await extractGitHubError(res, "GitHub API Error: Failed to construct Git Tree");
+    if (!res.ok) throw await extractGitHubError(res, "GitHub API Error: Failed to construct Git Tree. Ensure token scope is correct.");
     const newTreeSha = (await res.json()).sha;
 
     // 5. Create new Commit
@@ -279,22 +279,40 @@ async function pollWorkflowStatus(repo, token, commitSha) {
 // --- RESILIENT PARSER HELPER ---
 function parsePayloadContent(rawContent) {
     const files = [];
-    // Regex allows any language tag (html, javascript, css) or no tag, ensuring resilient parsing
-    const fileRegex = /\$\$\$\s*FILE:\s*([^\$]+)\s*\$\$\$\s*```[a-zA-Z]*\s*([\s\S]*?)```/g;
+    // Case-insensitive regex allows any language tag or Google Docs capitalizations
+    const fileRegex = /\$\$\$\s*file:\s*([^\$]+)\s*\$\$\$\s*```[a-z]*\s*([\s\S]*?)```/gi;
     let match;
+    
     while ((match = fileRegex.exec(rawContent)) !== null) {
         
         // 1. Sanitize the Path
         let cleanPath = match[1].replace(/[\r\n]+/g, '').trim();
-        // REMOVE leading dots and slashes (e.g. "./", "/") which throw 404 Not Found in Git Tree API
-        cleanPath = cleanPath.replace(/^[\.\/]+/, ''); 
-        // Convert any backslashes to forward slashes just in case
+        // Remove invisible Unicode characters (BOMs, zero-width spaces)
+        cleanPath = cleanPath.replace(/[\u200B-\u200D\uFEFF]/g, '');
+        
+        // REMOVE leading dots and slashes like "./" or "/" but PRESERVE ".github"
+        cleanPath = cleanPath.replace(/^(\.\/|\/)+/, ''); 
         cleanPath = cleanPath.replace(/\\/g, '/');
+
+        // CRITICAL FIX: Skip GitHub Action Workflow files.
+        // If your token lacks the specific 'workflow' scope, attempting to push
+        // a tree containing a .github/ file instantly throws a 404 Not Found error.
+        // Skipping it here ensures Rollbacks succeed seamlessly using the existing workflow.
+        if (cleanPath.toLowerCase().startsWith('.github/')) {
+            console.log(`Skipping workflow file to prevent token scope 404 crashes: ${cleanPath}`);
+            continue;
+        }
 
         // 2. Sanitize the Code Content
         let cleanContent = match[2].trim();
-        // FIX: Google Docs often replaces normal quotes with "Smart Quotes" which break JS logic on rollback.
+        // Google Docs smart quotes fix
         cleanContent = cleanContent.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
+        // Google Docs en-dash / em-dash fix (reverts to standard hyphen)
+        cleanContent = cleanContent.replace(/[\u2013\u2014]/g, '-');
+        // Google Docs non-breaking spaces fix
+        cleanContent = cleanContent.replace(/\xA0/g, ' ');
+        // Strip invisible characters inside code
+        cleanContent = cleanContent.replace(/[\u200B-\u200D\uFEFF]/g, '');
 
         if (cleanPath) {
             files.push({ path: cleanPath, content: cleanContent });
