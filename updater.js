@@ -1,9 +1,35 @@
 // ==========================================
-// Isolated Client-Side GitHub & Drive Updater
+// App Code Maintainer - Client-Side Logic
 // ==========================================
 
-// --- UTILITY LOGIC ---
+// --- HARDCODED BACKEND CONFIGURATION ---
+// IMPORTANT: Paste your deployed Google Apps Script Web App URL below
+const GAS_WEB_APP_URL = "YOUR_GAS_WEB_APP_URL_HERE";
+
+// --- UTILITY LOGIC & STATE ---
 const statusMsg = document.getElementById('status-message');
+const tokenInput = document.getElementById('gh-token');
+const folderInput = document.getElementById('gh-drive-folder');
+const branchInput = document.getElementById('gh-branch');
+const repoSelect = document.getElementById('gh-repo');
+
+// 1. Auto-Load settings from localStorage
+document.addEventListener("DOMContentLoaded", () => {
+    tokenInput.value = localStorage.getItem('acm_gh_token') || '';
+    folderInput.value = localStorage.getItem('acm_drive_folder') || '';
+    branchInput.value = localStorage.getItem('acm_gh_branch') || 'main';
+    
+    if (tokenInput.value.trim()) fetchRepos();
+});
+
+// 2. Auto-Save settings to localStorage
+tokenInput.addEventListener('change', (e) => {
+    localStorage.setItem('acm_gh_token', e.target.value.trim());
+    if (e.target.value.trim()) fetchRepos();
+});
+folderInput.addEventListener('change', (e) => localStorage.setItem('acm_drive_folder', e.target.value.trim()));
+branchInput.addEventListener('change', (e) => localStorage.setItem('acm_gh_branch', e.target.value.trim()));
+repoSelect.addEventListener('change', (e) => localStorage.setItem('acm_gh_repo', e.target.value));
 
 function setStatus(msg, type = 'info') {
     statusMsg.textContent = msg;
@@ -22,20 +48,22 @@ function getConfig() {
     const repo = document.getElementById('gh-repo').value.trim();
     const branch = document.getElementById('gh-branch').value.trim();
     const token = document.getElementById('gh-token').value.trim();
-    const gasUrl = document.getElementById('gas-url').value.trim();
-    let folderInput = document.getElementById('gh-drive-folder').value.trim();
+    let folderInputVal = document.getElementById('gh-drive-folder').value.trim();
     
-    if (!repo || !branch || !token || !gasUrl || !folderInput) {
+    if (!GAS_WEB_APP_URL || GAS_WEB_APP_URL === "YOUR_GAS_WEB_APP_URL_HERE") {
+        throw new Error("GAS Web App URL is missing. Please hardcode it in updater.js.");
+    }
+    if (!repo || !branch || !token || !folderInputVal) {
         throw new Error("All configuration fields in Step 1 are required.");
     }
 
-    let folderId = folderInput;
-    if (folderInput.includes('drive.google.com')) { 
-        const match = folderInput.match(/folders\/([a-zA-Z0-9_-]+)/); 
+    let folderId = folderInputVal;
+    if (folderInputVal.includes('drive.google.com')) { 
+        const match = folderInputVal.match(/folders\/([a-zA-Z0-9_-]+)/); 
         if (match) folderId = match[1]; 
     }
 
-    return { repo, branch, token, gasUrl, folderId };
+    return { repo, branch, token, gasUrl: GAS_WEB_APP_URL, folderId };
 }
 
 async function gasCall(gasUrl, payload) {
@@ -51,17 +79,57 @@ async function gasCall(gasUrl, payload) {
 }
 
 // --- GITHUB API LOGIC ---
+async function fetchRepos() {
+    const token = tokenInput.value.trim();
+    if (!token) {
+        repoSelect.innerHTML = '<option value="">Enter token to load repos...</option>';
+        return;
+    }
+    try {
+        repoSelect.innerHTML = '<option value="">Fetching repositories...</option>';
+        const res = await fetch('https://api.github.com/user/repos?per_page=100&sort=updated', {
+            headers: { "Authorization": `Bearer ${token}` }
+        });
+        if (!res.ok) throw new Error("Invalid or expired token");
+        
+        const repos = await res.json();
+        repoSelect.innerHTML = '';
+        
+        if (repos.length === 0) {
+            repoSelect.innerHTML = '<option value="">No repositories found</option>';
+            return;
+        }
+
+        repos.forEach(r => {
+            const opt = document.createElement('option');
+            opt.value = r.full_name;
+            opt.textContent = r.full_name;
+            repoSelect.appendChild(opt);
+        });
+
+        // Restore previously selected repo if it exists in the fetched list
+        const savedRepo = localStorage.getItem('acm_gh_repo');
+        if (savedRepo && [...repoSelect.options].some(o => o.value === savedRepo)) {
+            repoSelect.value = savedRepo;
+        } else {
+            // Save the first one as default if none matched
+            localStorage.setItem('acm_gh_repo', repoSelect.value);
+        }
+    } catch (e) {
+        repoSelect.innerHTML = '<option value="">Failed to load repos (Check token)</option>';
+    }
+}
+
 async function fetchAllRepoFiles(repo, branch, token) {
     const headers = { "Authorization": `Bearer ${token}` };
     const treeRes = await fetch(`https://api.github.com/repos/${repo}/git/trees/${branch}?recursive=1`, { headers });
     if (!treeRes.ok) throw new Error(`GitHub API Error: Could not fetch tree for branch '${branch}'.`);
     
     const treeData = await treeRes.json();
-    // Replicate previous backup logic: exclude updater dir and ensure it's a blob
     const fileNodes = treeData.tree.filter(item => item.type === 'blob' && !item.path.startsWith('updater/'));
     
     let compiledFiles = [];
-    const batchSize = 10; // Batch fetch to avoid rate limit spikes
+    const batchSize = 10; 
     
     for (let i = 0; i < fileNodes.length; i += batchSize) {
         const batch = fileNodes.slice(i, i + batchSize);
@@ -144,7 +212,7 @@ document.getElementById('updater-form').addEventListener('submit', async (e) => 
         while ((match = fileRegex.exec(payloadInput)) !== null) {
             files.push({ path: match[1].trim(), content: match[2].trim() });
         }
-        if (files.length === 0) throw new Error("No valid files parsed. Ensure you copied the exact format ($$$ FILE: path $$$ followed by ```javascript code block).");
+        if (files.length === 0) throw new Error("No valid files parsed. Ensure you copied the exact format.");
 
         submitBtn.disabled = true;
         btnSpinner.classList.remove('hidden');
@@ -164,7 +232,7 @@ document.getElementById('updater-form').addEventListener('submit', async (e) => 
         btnText.textContent = "Step 2/2: Pushing Update...";
         setStatus(`Backup successful! (${backupData.url}). Pushing new code to GitHub...`, "info");
 
-        await pushCommitToGitHub(config.repo, config.branch, config.token, files, "Automated emergency update & backup via Fail-Safe Client");
+        await pushCommitToGitHub(config.repo, config.branch, config.token, files, "Automated emergency update & backup via App Code Maintainer");
 
         setStatus(`Success! Pushed ${files.length} updated files. Action triggers deployed.`, "success");
         document.getElementById('gh-payload').value = '';
@@ -251,7 +319,7 @@ document.getElementById('rollback-btn').addEventListener('click', async () => {
         
         if (files.length === 0) throw new Error("Could not parse files from the backup document. Document may be malformed.");
 
-        await pushCommitToGitHub(config.repo, config.branch, config.token, files, "Emergency Repository Rollback via Fail-Safe Client");
+        await pushCommitToGitHub(config.repo, config.branch, config.token, files, "Emergency Repository Rollback via App Code Maintainer");
 
         setStatus(`Rollback Successful! Restored ${files.length} files to the selected state.`, "success");
         document.getElementById('rollback-container').classList.add('hidden');
