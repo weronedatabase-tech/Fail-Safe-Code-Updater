@@ -3,7 +3,6 @@
 // ==========================================
 
 // --- HARDCODED BACKEND CONFIGURATION ---
-// IMPORTANT: Paste your deployed Google Apps Script Web App URL below
 const GAS_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyLB4dyVb7r0IessnWtsYHf2Wl91HlownMG2Hlx3fvpD6wGl7Les7jvIta5CU4TmJZR/exec";
 
 // --- UTILITY LOGIC & STATE ---
@@ -15,7 +14,6 @@ const repoSelect = document.getElementById('gh-repo');
 const skipBackupCheckbox = document.getElementById('skip-backup');
 const updateBtnText = document.getElementById('btn-text');
 
-// 1. Auto-Load settings from localStorage
 document.addEventListener("DOMContentLoaded", () => {
     tokenInput.value = localStorage.getItem('acm_gh_token') || '';
     folderInput.value = localStorage.getItem('acm_drive_folder') || '';
@@ -26,7 +24,6 @@ document.addEventListener("DOMContentLoaded", () => {
     if (tokenInput.value.trim()) fetchRepos();
 });
 
-// 2. Auto-Save settings to localStorage
 tokenInput.addEventListener('change', (e) => {
     localStorage.setItem('acm_gh_token', e.target.value.trim());
     if (e.target.value.trim()) fetchRepos();
@@ -50,7 +47,6 @@ function toggleBtnText() {
 
 function setStatus(msg, type = 'info') {
     statusMsg.textContent = msg;
-    // Clear old state colors
     statusMsg.className = 'sticky top-4 z-50 shadow-2xl p-4 rounded-xl text-sm font-semibold text-center transition-all border backdrop-blur-md';
     
     if (type === 'error') {
@@ -97,27 +93,30 @@ async function gasCall(gasUrl, payload) {
     return data;
 }
 
+// --- GITHUB API HELPER: Safely extract error messages ---
+async function extractGitHubError(res, fallbackMsg) {
+    let errMsg = res.statusText;
+    try {
+        const errData = await res.json();
+        if (errData.message) errMsg = errData.message;
+    } catch(e) {}
+    return new Error(`${fallbackMsg}: ${errMsg}`);
+}
+
 // --- GITHUB API LOGIC ---
 async function fetchRepos() {
     const token = tokenInput.value.trim();
-    if (!token) {
-        repoSelect.innerHTML = '<option value="">Enter token to load repos...</option>';
-        return;
-    }
+    if (!token) return;
     try {
         repoSelect.innerHTML = '<option value="">Fetching repositories...</option>';
         const res = await fetch('https://api.github.com/user/repos?per_page=100&sort=updated', {
             headers: { "Authorization": `Bearer ${token}` }
         });
-        if (!res.ok) throw new Error("Invalid or expired token");
+        if (!res.ok) throw new Error("Invalid token");
         
         const repos = await res.json();
         repoSelect.innerHTML = '';
-        
-        if (repos.length === 0) {
-            repoSelect.innerHTML = '<option value="">No repositories found</option>';
-            return;
-        }
+        if (repos.length === 0) return repoSelect.innerHTML = '<option value="">No repositories found</option>';
 
         repos.forEach(r => {
             const opt = document.createElement('option');
@@ -140,7 +139,7 @@ async function fetchRepos() {
 async function fetchAllRepoFiles(repo, branch, token) {
     const headers = { "Authorization": `Bearer ${token}` };
     const treeRes = await fetch(`https://api.github.com/repos/${repo}/git/trees/${branch}?recursive=1`, { headers });
-    if (!treeRes.ok) throw new Error(`GitHub API Error: Could not fetch tree for branch '${branch}'.`);
+    if (!treeRes.ok) throw await extractGitHubError(treeRes, `GitHub API Error: Could not fetch tree for branch '${branch}'`);
     
     const treeData = await treeRes.json();
     const fileNodes = treeData.tree.filter(item => item.type === 'blob' && !item.path.startsWith('updater/'));
@@ -154,7 +153,7 @@ async function fetchAllRepoFiles(repo, branch, token) {
             const contentRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${file.sha}`, {
                 headers: { ...headers, "Accept": "application/vnd.github.v3.raw" }
             });
-            if (!contentRes.ok) throw new Error(`Failed to fetch raw blob for ${file.path}`);
+            if (!contentRes.ok) throw await extractGitHubError(contentRes, `Failed to fetch raw blob for ${file.path}`);
             return { path: file.path, content: await contentRes.text() };
         });
         compiledFiles.push(...(await Promise.all(promises)));
@@ -172,35 +171,57 @@ async function pushCommitToGitHub(repo, branch, token, files, commitMessage) {
     };
     const baseUrl = `https://api.github.com/repos/${repo}`;
 
+    // 1. Get current branch reference
     let res = await fetch(`${baseUrl}/git/refs/heads/${branch}`, { headers });
-    if (!res.ok) throw new Error(`GitHub API Error: Could not find branch '${branch}'.`);
+    if (!res.ok) throw await extractGitHubError(res, `GitHub API Error: Could not find branch '${branch}'`);
     const commitSha = (await res.json()).object.sha;
 
+    // 2. Get the base tree
     res = await fetch(`${baseUrl}/git/commits/${commitSha}`, { headers });
+    if (!res.ok) throw await extractGitHubError(res, `GitHub API Error: Failed to find base commit`);
     const baseTreeSha = (await res.json()).tree.sha;
 
-    const treeNodes = files.map(f => ({
-        path: f.path, mode: "100644", type: "blob", content: f.content
-    }));
+    // 3. Create standalone blobs sequentially to prevent payload size limits / WAF Blocks
+    const treeNodes = [];
+    for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        setStatus(`Uploading file ${i + 1} of ${files.length} as Blob: ${f.path}...`, 'info');
+        
+        const blobRes = await fetch(`${baseUrl}/git/blobs`, {
+            method: "POST", headers,
+            body: JSON.stringify({ content: f.content, encoding: "utf-8" })
+        });
+        
+        if (!blobRes.ok) throw await extractGitHubError(blobRes, `GitHub Blob Creation Failed (${f.path})`);
+        
+        const blobData = await blobRes.json();
+        treeNodes.push({ path: f.path, mode: "100644", type: "blob", sha: blobData.sha });
+    }
 
+    // 4. Create new Git Tree using the collected blob SHAs
+    setStatus("Constructing new Git Tree via SHAs...", 'info');
     res = await fetch(`${baseUrl}/git/trees`, {
         method: "POST", headers,
         body: JSON.stringify({ base_tree: baseTreeSha, tree: treeNodes })
     });
-    if (!res.ok) throw new Error("GitHub API Error: Failed to construct Git Tree.");
+    if (!res.ok) throw await extractGitHubError(res, "GitHub API Error: Failed to construct Git Tree");
     const newTreeSha = (await res.json()).sha;
 
+    // 5. Create new Commit
+    setStatus("Creating Commit...", 'info');
     res = await fetch(`${baseUrl}/git/commits`, {
         method: "POST", headers,
         body: JSON.stringify({ message: commitMessage, tree: newTreeSha, parents: [commitSha] })
     });
-    if (!res.ok) throw new Error("GitHub API Error: Failed to create Commit.");
+    if (!res.ok) throw await extractGitHubError(res, "GitHub API Error: Failed to create Commit");
     const newCommitSha = (await res.json()).sha;
 
+    // 6. Fast-forward the branch
+    setStatus("Fast-forwarding branch reference...", 'info');
     res = await fetch(`${baseUrl}/git/refs/heads/${branch}`, {
         method: "PATCH", headers, body: JSON.stringify({ sha: newCommitSha })
     });
-    if (!res.ok) throw new Error("GitHub API Error: Failed to update branch reference.");
+    if (!res.ok) throw await extractGitHubError(res, "GitHub API Error: Failed to update branch reference");
     
     return newCommitSha;
 }
@@ -242,7 +263,6 @@ async function pollWorkflowStatus(repo, token, commitSha) {
                     setStatus(`⏳ GitHub Action in progress (State: ${run.status})...`, 'info');
                 }
             } else {
-                // If no workflows are detected after 4 attempts (20 seconds), we can assume none exist
                 if (attempts > 4 && !runId) {
                     setStatus(`✅ Push successful! (No GitHub Actions workflow detected for this commit).`, 'success');
                     return;
@@ -254,6 +274,20 @@ async function pollWorkflowStatus(repo, token, commitSha) {
     }
     
     setStatus(`✅ Push successful! (Timed out waiting for GitHub Actions deployment feedback).`, 'success');
+}
+
+// --- PARSER HELPER ---
+function parsePayloadContent(rawContent) {
+    const files = [];
+    const fileRegex = /\$\$\$\s*FILE:\s*([^\$]+)\s*\$\$\$\s*```javascript([\s\S]*?)```/g;
+    let match;
+    while ((match = fileRegex.exec(rawContent)) !== null) {
+        // Strip invisible characters/newlines that Google Docs might add to the path
+        let cleanPath = match[1].replace(/[\r\n]+/g, '').trim();
+        if (cleanPath.startsWith('/')) cleanPath = cleanPath.substring(1);
+        files.push({ path: cleanPath, content: match[2].trim() });
+    }
+    return files;
 }
 
 // --- CORE ACTIONS ---
@@ -268,13 +302,7 @@ document.getElementById('updater-form').addEventListener('submit', async (e) => 
 
     try {
         const config = getConfig();
-        
-        const files = [];
-        const fileRegex = /\$\$\$\s*FILE:\s*([^\$]+)\s*\$\$\$\s*```javascript([\s\S]*?)```/g;
-        let match;
-        while ((match = fileRegex.exec(payloadInput)) !== null) {
-            files.push({ path: match[1].trim(), content: match[2].trim() });
-        }
+        const files = parsePayloadContent(payloadInput);
         if (files.length === 0) throw new Error("No valid files parsed. Ensure you copied the exact format.");
 
         submitBtn.disabled = true;
@@ -297,13 +325,12 @@ document.getElementById('updater-form').addEventListener('submit', async (e) => 
 
         const newCommitSha = await pushCommitToGitHub(config.repo, config.branch, config.token, files, "Automated emergency update via App Code Maintainer");
 
-        // UI Reset before polling so user can act immediately if they want
+        // UI Reset
         document.getElementById('gh-payload').value = '';
         submitBtn.disabled = false;
         btnSpinner.classList.add('hidden');
         toggleBtnText();
 
-        // Start polling the actions asynchronously
         pollWorkflowStatus(config.repo, config.token, newCommitSha);
 
     } catch (err) {
@@ -378,25 +405,17 @@ document.getElementById('rollback-btn').addEventListener('click', async () => {
         btnText.textContent = "Pushing Rollback...";
         setStatus("Parsing document and executing rollback over GitHub API...", "info");
 
-        const files = [];
-        const fileRegex = /\$\$\$\s*FILE:\s*([^\$]+)\s*\$\$\$\s*```javascript([\s\S]*?)```/g;
-        let match;
-        while ((match = fileRegex.exec(data.content)) !== null) {
-            files.push({ path: match[1].trim(), content: match[2].trim() });
-        }
-        
-        if (files.length === 0) throw new Error("Could not parse files from the backup document. Document may be malformed.");
+        const files = parsePayloadContent(data.content);
+        if (files.length === 0) throw new Error("Could not parse files from the backup document. Document may be malformed or empty.");
 
         const newCommitSha = await pushCommitToGitHub(config.repo, config.branch, config.token, files, "Emergency Repository Rollback via App Code Maintainer");
 
         document.getElementById('rollback-container').classList.add('hidden');
         
-        // Reset UI immediately
         btn.disabled = false;
         btnSpinner.classList.add('hidden');
         btnText.textContent = "Perform Rollback";
 
-        // Poll Github actions for rollback deployment status
         pollWorkflowStatus(config.repo, config.token, newCommitSha);
 
     } catch(err) {
