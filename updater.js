@@ -276,16 +276,29 @@ async function pollWorkflowStatus(repo, token, commitSha) {
     setStatus(`✅ Push successful! (Timed out waiting for GitHub Actions deployment feedback).`, 'success');
 }
 
-// --- PARSER HELPER ---
+// --- RESILIENT PARSER HELPER ---
 function parsePayloadContent(rawContent) {
     const files = [];
-    const fileRegex = /\$\$\$\s*FILE:\s*([^\$]+)\s*\$\$\$\s*```javascript([\s\S]*?)```/g;
+    // Regex allows any language tag (html, javascript, css) or no tag, ensuring resilient parsing
+    const fileRegex = /\$\$\$\s*FILE:\s*([^\$]+)\s*\$\$\$\s*```[a-zA-Z]*\s*([\s\S]*?)```/g;
     let match;
     while ((match = fileRegex.exec(rawContent)) !== null) {
-        // Strip invisible characters/newlines that Google Docs might add to the path
+        
+        // 1. Sanitize the Path
         let cleanPath = match[1].replace(/[\r\n]+/g, '').trim();
-        if (cleanPath.startsWith('/')) cleanPath = cleanPath.substring(1);
-        files.push({ path: cleanPath, content: match[2].trim() });
+        // REMOVE leading dots and slashes (e.g. "./", "/") which throw 404 Not Found in Git Tree API
+        cleanPath = cleanPath.replace(/^[\.\/]+/, ''); 
+        // Convert any backslashes to forward slashes just in case
+        cleanPath = cleanPath.replace(/\\/g, '/');
+
+        // 2. Sanitize the Code Content
+        let cleanContent = match[2].trim();
+        // FIX: Google Docs often replaces normal quotes with "Smart Quotes" which break JS logic on rollback.
+        cleanContent = cleanContent.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
+
+        if (cleanPath) {
+            files.push({ path: cleanPath, content: cleanContent });
+        }
     }
     return files;
 }
