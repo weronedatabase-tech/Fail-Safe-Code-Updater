@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Fail-Safe Code Updater</title>
+<title>App Code Maintainer</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
  tailwind.config = { darkMode: 'class', theme: { extend: { colors: { darkbase: '#000000', darksurface: '#121212', darkborder: '#2e2e2e', darkinput: '#1e1e1e' } } } }
@@ -13,6 +13,7 @@
  .spinner { border: 3px solid rgba(255,255,255,.1); width: 20px; height: 20px; border-radius: 50%; border-left-color: #fff; animation: spin 1s linear infinite; }
  @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
  .hidden { display: none !important; }
+ select option { background-color: #1e1e1e; color: #fff; }
 </style>
 </head>
 <body class="bg-darkbase text-gray-100 h-[100dvh] flex flex-col p-3 md:p-6 overflow-hidden">
@@ -20,8 +21,8 @@
 <div class="max-w-4xl mx-auto w-full flex-grow flex flex-col min-h-0 overflow-y-auto pr-2 custom-scrollbar">
  <div class="mb-4 shrink-0">
    <h1 class="text-2xl md:text-3xl font-bold text-indigo-400 flex items-center gap-2 md:gap-3">
-     <svg class="w-6 h-6 md:w-8 md:h-8 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" /></svg>
-     <span class="truncate">Fail-Safe Code Updater</span>
+     <svg class="w-6 h-6 md:w-8 md:h-8 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>
+     <span class="truncate">App Code Maintainer</span>
    </h1>
    <p class="text-gray-400 mt-2 text-xs md:text-sm">Isolated emergency deployment tool with integrated Google Drive backups and rollback support.</p>
  </div>
@@ -37,24 +38,28 @@
    </div>
    <div class="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
      <div>
-       <label class="block font-semibold mb-1 text-xs text-gray-400">GitHub Repo (owner/repo)</label>
-       <input type="text" id="gh-repo" required class="w-full border-2 border-darkborder rounded-lg py-1.5 px-3 bg-darkinput text-white outline-none focus:border-indigo-500 transition text-sm" placeholder="e.g. oncloudnintynine/Cloud-Moves">
+       <label class="block font-semibold mb-1 text-xs text-gray-400 flex justify-between">
+         <span>GitHub Fine-Grained Token</span>
+         <span class="text-indigo-400/70 text-[10px]">Saved in browser</span>
+       </label>
+       <input type="password" id="gh-token" required class="w-full border-2 border-darkborder rounded-lg py-1.5 px-3 bg-darkinput text-white outline-none focus:border-indigo-500 transition text-sm" placeholder="Paste token to fetch repositories">
+     </div>
+     <div class="md:col-span-1">
+       <label class="block font-semibold mb-1 text-xs text-gray-400 flex justify-between">
+         <span>Backup Drive Folder ID</span>
+         <span class="text-indigo-400/70 text-[10px]">Saved in browser</span>
+       </label>
+       <input type="text" id="gh-drive-folder" required class="w-full border-2 border-darkborder rounded-lg py-1.5 px-3 bg-darkinput text-white outline-none focus:border-indigo-500 transition text-sm" placeholder="Paste Drive Folder ID or URL here">
+     </div>
+     <div>
+       <label class="block font-semibold mb-1 text-xs text-gray-400">Target Repository</label>
+       <select id="gh-repo" required class="w-full border-2 border-darkborder rounded-lg py-1.5 px-3 bg-darkinput text-white outline-none focus:border-indigo-500 transition text-sm appearance-none">
+         <option value="">Enter token to load repos...</option>
+       </select>
      </div>
      <div>
        <label class="block font-semibold mb-1 text-xs text-gray-400">Target Branch</label>
        <input type="text" id="gh-branch" required value="main" class="w-full border-2 border-darkborder rounded-lg py-1.5 px-3 bg-darkinput text-white outline-none focus:border-indigo-500 transition text-sm">
-     </div>
-     <div>
-       <label class="block font-semibold mb-1 text-xs text-gray-400">GitHub Fine-Grained Token</label>
-       <input type="password" id="gh-token" required class="w-full border-2 border-darkborder rounded-lg py-1.5 px-3 bg-darkinput text-white outline-none focus:border-indigo-500 transition text-sm" placeholder="Contents (Read/Write) permissions">
-     </div>
-     <div>
-       <label class="block font-semibold mb-1 text-xs text-gray-400">GAS Web App URL (For Drive Backup)</label>
-       <input type="password" id="gas-url" required class="w-full border-2 border-darkborder rounded-lg py-1.5 px-3 bg-darkinput text-white outline-none focus:border-indigo-500 transition text-sm" placeholder="https://script.google.com/macros/s/.../exec">
-     </div>
-     <div class="md:col-span-2">
-       <label class="block font-semibold mb-1 text-xs text-gray-400">Backup Drive Folder ID</label>
-       <input type="text" id="gh-drive-folder" required class="w-full border-2 border-darkborder rounded-lg py-1.5 px-3 bg-darkinput text-white outline-none focus:border-indigo-500 transition text-sm" placeholder="Paste Drive Folder ID or URL here">
      </div>
    </div>
  </div>
