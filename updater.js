@@ -293,9 +293,6 @@ function parsePayloadContent(rawContent) {
         cleanPath = cleanPath.replace(/\\/g, '/');
 
         // CRITICAL FIX: Skip GitHub Action Workflow files.
-        // If your token lacks the specific 'workflow' scope, attempting to push
-        // a tree containing a .github/ file instantly throws a 404 Not Found error.
-        // Skipping it here ensures Rollbacks succeed seamlessly using the existing workflow.
         if (cleanPath.toLowerCase().startsWith('.github/')) {
             console.log(`Skipping workflow file to prevent token scope 404 crashes: ${cleanPath}`);
             continue;
@@ -303,6 +300,12 @@ function parsePayloadContent(rawContent) {
 
         // 2. Sanitize the Code Content
         let cleanContent = match[2].trim();
+        
+        // FIX FOR SINGLE-LINE GITHUB UI ISSUE:
+        // Google Docs API (getText) natively returns '\r' as line breaks.
+        // GitHub strictly requires '\n' for proper multiline code rendering.
+        cleanContent = cleanContent.replace(/\r\n|\r/g, '\n');
+
         // Google Docs smart quotes fix
         cleanContent = cleanContent.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
 
