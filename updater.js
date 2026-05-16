@@ -54,7 +54,7 @@ function setStatus(msg, type = 'info') {
     } else if (type === 'success') {
         statusMsg.classList.add('bg-emerald-900/80', 'text-emerald-100', 'border-emerald-800');
     } else {
-        statusMsg.classList.add('bg-indigo-900/80', 'text-indigo-100', 'border-indigo-800');
+        statusMsg.classList.add('bg-blue-900/80', 'text-blue-100', 'border-blue-800');
     }
     statusMsg.classList.remove('hidden');
 }
@@ -142,7 +142,17 @@ async function fetchAllRepoFiles(repo, branch, token) {
     if (!treeRes.ok) throw await extractGitHubError(treeRes, `GitHub API Error: Could not fetch tree for branch '${branch}'`);
     
     const treeData = await treeRes.json();
-    const fileNodes = treeData.tree.filter(item => item.type === 'blob' && !item.path.startsWith('updater/'));
+    
+    // Rigorous filter: Skip blobs that are non-text / binary (images, fonts, zips, media)
+    const fileNodes = treeData.tree.filter(item => {
+        if (item.type !== 'blob') return false;
+        if (item.path.startsWith('updater/')) return false;
+        
+        const imageAndBinaryRegex = /\.(png|jpe?g|gif|svg|ico|webp|pdf|zip|tar|gz|mp3|mp4|mov|avi|ttf|woff|woff2|eot|bin|exe|dll|psd|ai|sketch|wav|ogg)$/i;
+        if (item.path.match(imageAndBinaryRegex)) return false;
+        
+        return true;
+    });
     
     let compiledFiles = [];
     const batchSize = 10; 
@@ -293,21 +303,21 @@ function parsePayloadContent(rawContent) {
         cleanPath = cleanPath.replace(/\\/g, '/');
 
         // CRITICAL FIX: Skip GitHub Action Workflow files.
+        // If your token lacks the specific 'workflow' scope, attempting to push
+        // a tree containing a .github/ file instantly throws a 404 Not Found error.
+        // Skipping it here ensures Rollbacks succeed seamlessly using the existing workflow.
         if (cleanPath.toLowerCase().startsWith('.github/')) {
             console.log(`Skipping workflow file to prevent token scope 404 crashes: ${cleanPath}`);
             continue;
         }
 
-        // 2. Sanitize the Code Content
+        // 2. Format & Sanitize the Code Content
         let cleanContent = match[2].trim();
         
         // FIX FOR SINGLE-LINE GITHUB UI ISSUE:
         // Google Docs API (getText) natively returns '\r' as line breaks.
         // GitHub strictly requires '\n' for proper multiline code rendering.
         cleanContent = cleanContent.replace(/\r\n|\r/g, '\n');
-
-        // Google Docs smart quotes fix
-        cleanContent = cleanContent.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
 
         if (cleanPath) {
             files.push({ path: cleanPath, content: cleanContent });
@@ -367,7 +377,36 @@ document.getElementById('updater-form').addEventListener('submit', async (e) => 
     }
 });
 
-// 2. LOAD BACKUPS FLOW
+// 2. MANUAL BACKUP FLOW
+document.getElementById('manual-backup-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('manual-backup-btn');
+    const btnText = document.getElementById('manual-backup-btn-text');
+    const btnSpinner = document.getElementById('manual-backup-btn-spinner');
+    
+    try {
+        const config = getConfig();
+        btn.disabled = true;
+        btnSpinner.classList.remove('hidden');
+        btnText.textContent = "Backing up repository...";
+        setStatus("Fetching full repository tree to create a manual Drive backup...", "info");
+        
+        const { fileNodes, compiledFiles } = await fetchAllRepoFiles(config.repo, config.branch, config.token);
+        const hierarchy = fileNodes.map(f => f.path).join('\n');
+        
+        const backupData = await gasCall(config.gasUrl, { action: 'backupCode', folderId: config.folderId, hierarchy, files: compiledFiles });
+        
+        setStatus(`Manual Backup successful! Saved to Google Drive: ${backupData.url}`, "success");
+        
+    } catch(err) {
+        setStatus(err.message, "error");
+    } finally {
+        btn.disabled = false;
+        btnSpinner.classList.add('hidden');
+        btnText.textContent = "Create Manual Backup";
+    }
+});
+
+// 3. LOAD BACKUPS FLOW
 document.getElementById('load-backups-btn').addEventListener('click', async () => {
     const btn = document.getElementById('load-backups-btn');
     const btnText = document.getElementById('load-btn-text');
@@ -405,11 +444,11 @@ document.getElementById('load-backups-btn').addEventListener('click', async () =
     } finally {
         btn.disabled = false;
         btnSpinner.classList.add('hidden');
-        btnText.textContent = "Refresh Available Backups";
+        btnText.textContent = "Load Available Backups";
     }
 });
 
-// 3. EXECUTE ROLLBACK FLOW
+// 4. EXECUTE ROLLBACK FLOW
 document.getElementById('rollback-btn').addEventListener('click', async () => {
     const btn = document.getElementById('rollback-btn');
     const btnText = document.getElementById('rb-btn-text');
