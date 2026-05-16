@@ -1,4 +1,4 @@
-function doPost(e) {
+function doPost(e) { 
   try {
     // Enable CORS by handling preflight in doOptions if necessary
     if (!e || !e.postData || !e.postData.contents) {
