@@ -13,6 +13,7 @@ const branchInput = document.getElementById('gh-branch');
 const repoSelect = document.getElementById('gh-repo');
 const skipBackupCheckbox = document.getElementById('skip-backup');
 const updateBtnText = document.getElementById('btn-text');
+const driveFolderNameDisplay = document.getElementById('drive-folder-name');
 
 // --- FOLDER BROWSER MODAL DOM ---
 const folderModal = document.getElementById('folder-browser-modal');
@@ -37,13 +38,22 @@ document.addEventListener("DOMContentLoaded", () => {
  
  toggleBtnText();
  if (tokenInput.value.trim()) fetchRepos();
+ if (folderInput.value.trim()) fetchFolderName(folderInput.value);
 });
 
 tokenInput.addEventListener('change', (e) => {
  localStorage.setItem('acm_gh_token', e.target.value.trim());
  if (e.target.value.trim()) fetchRepos();
 });
-folderInput.addEventListener('change', (e) => localStorage.setItem('acm_drive_folder', e.target.value.trim()));
+folderInput.addEventListener('change', (e) => {
+ const val = e.target.value.trim();
+ localStorage.setItem('acm_drive_folder', val);
+ if (val) {
+     fetchFolderName(val);
+ } else {
+     driveFolderNameDisplay.classList.add('hidden');
+ }
+});
 branchInput.addEventListener('change', (e) => localStorage.setItem('acm_gh_branch', e.target.value.trim()));
 repoSelect.addEventListener('change', (e) => localStorage.setItem('acm_gh_repo', e.target.value));
 
@@ -84,11 +94,50 @@ function generateBackupLinkHtml(url, label = "View on Google Drive &nearr;") {
    </span>`;
 }
 
+function extractFolderId(input) {
+    let folderId = input.trim();
+    if (folderId.includes('drive.google.com')) {
+        const match = folderId.match(/folders\/([a-zA-Z0-9_-]+)/);
+        if (match) folderId = match[1];
+    }
+    return folderId;
+}
+
+function displayFolderName(name, isError = false) {
+    driveFolderNameDisplay.classList.remove('hidden');
+    if (isError) {
+        driveFolderNameDisplay.className = 'text-[11px] text-rose-400 font-medium px-1 mt-1.5 truncate';
+        driveFolderNameDisplay.textContent = name;
+    } else {
+        driveFolderNameDisplay.className = 'text-[11px] text-emerald-400 font-medium px-1 mt-1.5 truncate';
+        driveFolderNameDisplay.textContent = `📁 Selected Folder: ${name}`;
+    }
+}
+
+async function fetchFolderName(rawInput) {
+    const folderId = extractFolderId(rawInput);
+    if (!folderId) {
+        driveFolderNameDisplay.classList.add('hidden');
+        return;
+    }
+    
+    driveFolderNameDisplay.classList.remove('hidden');
+    driveFolderNameDisplay.className = 'text-[11px] text-gray-400 font-medium px-1 mt-1.5 truncate';
+    driveFolderNameDisplay.textContent = 'Resolving folder name...';
+    
+    try {
+        const data = await gasCall(GAS_WEB_APP_URL, { action: 'getFolderInfo', folderId });
+        displayFolderName(data.name);
+    } catch (err) {
+        displayFolderName('Invalid or inaccessible folder ID', true);
+    }
+}
+
 function getConfig() {
  const repo = document.getElementById('gh-repo').value.trim();
  const branch = document.getElementById('gh-branch').value.trim();
  const token = document.getElementById('gh-token').value.trim();
- let folderInputVal = document.getElementById('gh-drive-folder').value.trim();
+ const folderInputVal = document.getElementById('gh-drive-folder').value.trim();
  
  if (!GAS_WEB_APP_URL || GAS_WEB_APP_URL === "YOUR_GAS_WEB_APP_URL_HERE") {
      throw new Error("GAS Web App URL is missing. Please hardcode it in updater.js.");
@@ -97,11 +146,7 @@ function getConfig() {
      throw new Error("All configuration fields in Step 1 are required.");
  }
 
- let folderId = folderInputVal;
- if (folderInputVal.includes('drive.google.com')) { 
-     const match = folderInputVal.match(/folders\/([a-zA-Z0-9_-]+)/); 
-     if (match) folderId = match[1]; 
- }
+ const folderId = extractFolderId(folderInputVal);
 
  return { repo, branch, token, gasUrl: GAS_WEB_APP_URL, folderId, skipBackup: skipBackupCheckbox.checked };
 }
@@ -262,6 +307,7 @@ btnConfirmFolder.addEventListener('click', () => {
     if (activeSelectedFolder) {
         folderInput.value = activeSelectedFolder.id;
         localStorage.setItem('acm_drive_folder', activeSelectedFolder.id);
+        displayFolderName(activeSelectedFolder.name); // Instantly display the pre-fetched name
         closeFolderModal();
     }
 });
