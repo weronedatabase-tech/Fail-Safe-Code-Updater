@@ -7,4 +7,4 @@ If forked, remember to:
 |CLASP_CREDENTIALS|
 |GAS_DEPLOYMENT_ID|
 |GAS_SCRIPT_ID|
-4. go to Actions and enable workflow
+4. Go to Actions and enable workflow
