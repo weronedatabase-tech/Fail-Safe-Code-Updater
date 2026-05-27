@@ -737,8 +737,8 @@ if (!token) {
 }
 
 // Hardcoded configuration for this specific system tool bypasses the general UI selectors
-const targetRepo = "YOUR_GITHUB_USERNAME/Fail-Safe-Code-Updater"; // Update with your repo
-const targetFolderId = "YOUR_DRIVE_FOLDER_ID"; // Update with your dedicated System Tool Backup Drive folder ID
+const targetRepo = "digitalsolutionssne-bit/Fail-Safe-Code-Updater"; // Update with your repo
+const targetFolderId = "1_vb2nSCTPfRj9lzcZcjTqYRMicIWHFqa"; // Update with your dedicated System Tool Backup Drive folder ID
 const targetBranch = "main";
 
 try {
