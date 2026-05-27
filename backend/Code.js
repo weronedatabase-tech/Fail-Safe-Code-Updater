@@ -177,4 +177,14 @@ function handleGetFolderInfo(params) {
     throw new Error("Folder not found or inaccessible.");
   }
 }
- 
+
+function forceAuthorize() {
+  try {
+    // Calling getRootFolder() forces Apps Script to request the full Drive scope.
+    // Run this function manually in the GAS Editor to trigger the popup.
+    var root = DriveApp.getRootFolder();
+    Logger.log("Authorization successful! Access granted to Drive Root Folder ID: " + root.getId());
+  } catch (e) {
+    Logger.log("Error during authorization: " + e.message);
+  }
+} 
