@@ -1,4 +1,4 @@
-# https://weronedatabase-tech.github.io/Fail-Safe-Code-Updater/
+# https://digitalsolutionssne-bit.github.io/Fail-Safe-Code-Updater/
 
 If forked, remember to:
 1. Change the GAS webapp link under updater.js.
