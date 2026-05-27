@@ -3,7 +3,7 @@
 // ==========================================
 
 // --- HARDCODED BACKEND CONFIGURATION ---
-const GAS_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz6o6eW27oFWZmgXF-UpokwRX4bRwptHusJVoaGTlueJ9mrcMHm9OS5EhDhPBoqSqAS/exec";
+const GAS_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxrvR-INi3X6cVNG2GgccCHwm8WIK7yc7w_qEC5LNN1OuUBNk77aqSDuW5XZ5ryUwPgjQ/exec";
 
 // --- UTILITY LOGIC & STATE ---
 const statusMsg = document.getElementById('status-message');
