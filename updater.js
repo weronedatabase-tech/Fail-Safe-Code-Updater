@@ -515,8 +515,8 @@ setStatus(`✅ Push successful! (Timed out waiting for GitHub Actions deployment
 // --- RESILIENT PARSER HELPER ---
 function parsePayloadContent(rawContent) {
 const files = [];
-// Case-insensitive regex allows any language tag or Google Docs capitalizations
-const fileRegex = /\$\$\$\s*file:\s*([^\$]+)\s*\$\$\$\s*```[a-z]*\s*([\s\S]*?)```/gi;
+// Updated to support new custom boundary formats from AI
+const fileRegex = /@@@===FILE_PATH:\s*(.*?)\s*===@@@[\s\S]*?@@@===CODE_START===@@@\s*([\s\S]*?)\s*@@@===CODE_END===@@@/gi;
 let match;
 
 while ((match = fileRegex.exec(rawContent)) !== null) {
@@ -737,8 +737,8 @@ if (!token) {
 }
 
 // Hardcoded configuration for this specific system tool bypasses the general UI selectors
-const targetRepo = "digitalsolutionssne-bit/Fail-Safe-Code-Updater"; // Update with your repo
-const targetFolderId = "1_vb2nSCTPfRj9lzcZcjTqYRMicIWHFqa"; // Update with your dedicated System Tool Backup Drive folder ID
+const targetRepo = "weronedatabase-tech/Fail-Safe-Code-Updater";
+const targetFolderId = "1u0irLS2iRZX9Tpx92uazdRukTemA3pLL";
 const targetBranch = "main";
 
 try {
