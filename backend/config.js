@@ -1,14 +1,6 @@
 // ==========================================
 // Instance-Specific Configuration
 // ==========================================
-const APP_CONFIG = {
-
-};
-
-
-// ==========================================
-// Instance-Specific Configuration
-// ==========================================
 // Using 'var' instead of 'const' to prevent Google Apps Script V8 global scope
 // redeclaration errors when this file is synced to the backend.
 var APP_CONFIG = {
