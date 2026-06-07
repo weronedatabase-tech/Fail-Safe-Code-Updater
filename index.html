@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title id="app-title">App Code Maintainer</title>
+<title id="app-title">Loading Environment...</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
 tailwind.config = { darkMode: 'class', theme: { extend: { colors: { darkbase: '#000000', darksurface: '#121212', darkborder: '#2e2e2e', darkinput: '#1e1e1e' } } } }
@@ -35,7 +35,7 @@ navigator.serviceWorker.register('sw.js').catch(err => console.log('SW setup ski
 <div class="flex justify-between items-start md:items-center w-full">
 <h1 class="text-3xl md:text-4xl font-extrabold text-indigo-400 flex items-center gap-3">
 <svg class="w-8 h-8 md:w-10 md:h-10 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>
-<span class="tracking-tight" id="app-header-name">App Code Maintainer</span>
+<span class="tracking-tight" id="app-header-name">Loading...</span>
 </h1>
 <div class="flex gap-2">
 <a id="link-template-prompt" href="#" target="_blank" class="p-2.5 bg-darkinput border border-darkborder hover:border-indigo-500 rounded-xl text-indigo-400 transition shadow-inner group" title="Template Prompt">
@@ -151,7 +151,7 @@ navigator.serviceWorker.register('sw.js').catch(err => console.log('SW setup ski
 <p class="text-[11px] text-gray-500 text-center uppercase tracking-wider font-bold">System Maintenance</p>
 <button type="button" id="updater-backup-btn" class="w-full bg-indigo-900/40 hover:bg-indigo-800/60 border border-indigo-500/30 text-indigo-300 font-bold py-3 px-4 rounded-xl transition-all active:scale-[0.98] flex justify-center items-center gap-3">
 <svg class="w-5 h-5 shrink-0 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
-<span id="updater-backup-btn-text">Backup App</span>
+<span id="updater-backup-btn-text">Backup System</span>
 <div id="updater-backup-btn-spinner" class="spinner hidden" style="border-left-color: #818cf8;"></div>
 </button>
 </div>
