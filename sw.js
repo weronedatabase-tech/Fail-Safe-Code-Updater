@@ -1,4 +1,4 @@
-const CACHE_NAME = 'fail-safe-updater-v1.1.3';
+const CACHE_NAME = 'fail-safe-updater-v1.1.4';
 self.addEventListener('install', (e) => {
 self.skipWaiting();
 });
