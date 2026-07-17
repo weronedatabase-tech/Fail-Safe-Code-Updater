@@ -1366,4 +1366,3 @@ uploadIconsBtn.addEventListener('click', async () => {
       btnText.textContent = "Push Configured Icons to Repository";
   }
 });
-ALL BATCHES COMPLETE.
