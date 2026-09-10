@@ -1,0 +1,19 @@
+{
+  "name": "applet",
+  "version": "1.0.0",
+  "description": "Follow these steps to deploy your own isolated instance of the App Code Maintainer using completely new accounts.",
+  "main": "sw.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "build": "echo \"No build step required\"",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1"
+  }
+}

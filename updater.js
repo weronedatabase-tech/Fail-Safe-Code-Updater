@@ -1,3 +1,4 @@
+import { processDriveAction, forceAuthDrive } from './new_drive_api.js';
 // ==========================================
 // App Code Maintainer - Client-Side Logic
 // ==========================================
@@ -274,15 +275,8 @@ return { repo, branch, token, gasUrl: GAS_WEB_APP_URL, folderId, skipBackup: ski
 }
 
 async function gasCall(gasUrl, payload) {
-const res = await fetch(gasUrl, {
- method: 'POST',
- mode: 'cors',
- headers: { 'Content-Type': 'text/plain;charset=utf-8' },
- body: JSON.stringify(payload)
-});
-const data = await res.json();
-if (data.error) throw new Error("GAS Error: " + data.error);
-return data;
+    console.log("Intercepting gasCall", payload);
+    return await processDriveAction(payload);
 }
 
 // --- FOLDER BROWSER MODAL LOGIC ---
@@ -1365,4 +1359,29 @@ uploadIconsBtn.addEventListener('click', async () => {
       btnSpinner.classList.add('hidden');
       btnText.textContent = "Push Configured Icons to Repository";
   }
+});
+
+
+document.addEventListener("DOMContentLoaded", () => {
+    const authBtn = document.getElementById('btn-auth-drive');
+    if (authBtn) {
+        authBtn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            authBtn.textContent = "Connecting...";
+            try {
+                await forceAuthDrive();
+                authBtn.textContent = "Connected ✓";
+                authBtn.classList.remove('bg-blue-600', 'hover:bg-blue-500');
+                authBtn.classList.add('bg-emerald-600', 'hover:bg-emerald-500');
+                // Re-trigger folder fetch
+                const folderInput = document.getElementById('gh-drive-folder');
+                if (folderInput.value.trim()) {
+                    folderInput.dispatchEvent(new Event('change'));
+                }
+            } catch(e) {
+                authBtn.textContent = "Failed. Try Again";
+                console.error(e);
+            }
+        });
+    }
 });
