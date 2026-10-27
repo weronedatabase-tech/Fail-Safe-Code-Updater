@@ -11,6 +11,8 @@ function doPost(e) {
 
     if (action === 'backupCode') {
       result = handleBackup(params);
+    } else if (action === 'renameBackup') {
+      result = handleRenameBackup(params);
     } else if (action === 'getBackups') {
       result = handleGetBackups(params);
     } else if (action === 'getBackupContent') {
@@ -44,6 +46,7 @@ function handleBackup(params) {
   const files = params.files;
   // Use the dynamically passed repo name from the frontend, fallback to a generic name if missing
   const repoName = params.repoName || "App";
+  const customBackupName = params.backupName ? String(params.backupName).trim() : "";
 
   if (!folderId || !files) {
     throw new Error("Missing required parameters: folderId or files.");
@@ -52,8 +55,8 @@ function handleBackup(params) {
   const folder = DriveApp.getFolderById(folderId);
   const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
 
-  // Dynamically name the file based on the target repository
-  const docName = `${repoName} Code Backup - ${dateStr}`;
+  // Use user-supplied backupName if provided, otherwise use the default naming convention
+  const docName = customBackupName || `${repoName} Code Backup - ${dateStr}`;
 
   const doc = DocumentApp.create(docName);
   const fileId = doc.getId();
@@ -82,7 +85,39 @@ function handleBackup(params) {
 
   return {
     url: driveFile.getUrl(),
-    id: fileId
+    id: fileId,
+    name: docName
+  };
+}
+
+function handleRenameBackup(params) {
+  const fileId = params.fileId;
+  const newName = params.newName ? String(params.newName).trim() : "";
+
+  if (!fileId || !newName) {
+    throw new Error("Missing required parameters: fileId or newName.");
+  }
+
+  const file = DriveApp.getFileById(fileId);
+  file.setName(newName);
+
+  // Also update the header line inside the Google Doc if applicable
+  try {
+    const doc = DocumentApp.openById(fileId);
+    const body = doc.getBody();
+    if (body.getNumChildren() > 0) {
+      const firstPara = body.getChild(0).asParagraph();
+      if (firstPara.getText().indexOf("--- START OF FILE ") === 0) {
+        firstPara.setText(`--- START OF FILE ${newName} ---`);
+      }
+    }
+    doc.saveAndClose();
+  } catch (e) {}
+
+  return {
+    id: file.getId(),
+    name: file.getName(),
+    url: file.getUrl()
   };
 }
 

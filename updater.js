@@ -160,13 +160,34 @@ if (type === 'error') {
 statusMsg.classList.remove('hidden');
 }
 
-function generateBackupLinkHtml(url, label = "View on Google Drive &nearr;") {
+function formatBackupTimestamp(date = new Date()) {
+const pad = (n) => String(n).padStart(2, '0');
+return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function getDefaultBackupName(repoNameStr) {
+const cleanRepo = (repoNameStr || 'App').split('/').pop() || 'App';
+return `${cleanRepo} Code Backup - ${formatBackupTimestamp()}`;
+}
+
+function escapeHtmlAttr(str) {
+return String(str || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function generateBackupLinkHtml(url, label = "View on Google Drive &nearr;", backupId = null, backupName = null) {
+const safeName = escapeHtmlAttr(backupName || '');
+const editBtnHtml = backupId ? `
+ <button type="button" onclick="window.triggerEditBackupName('${escapeHtmlAttr(backupId)}', this.dataset.backupName, this)" data-backup-name="${safeName}" class="inline-flex items-center gap-1 px-2.5 py-1.5 bg-black/20 hover:bg-black/40 border border-white/10 rounded-lg shadow-sm text-xs font-semibold text-indigo-200 hover:text-white transition-all active:scale-95" title="Edit Backup Name">
+   <svg class="w-3.5 h-3.5 text-indigo-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+   <span>Edit Name</span>
+ </button>` : '';
+
 return `
-<span class="inline-flex items-center gap-1.5 align-middle whitespace-nowrap mt-2 md:mt-0 md:ml-2">
+<span class="inline-flex flex-wrap items-center gap-1.5 align-middle whitespace-nowrap mt-2 md:mt-0 md:ml-2">
  <a href="${url}" target="_blank" class="inline-block underline font-bold hover:text-white transition-colors text-xs bg-black/20 px-3 py-1.5 rounded-lg border border-white/10 shadow-sm">${label}</a>
  <button type="button" onclick="navigator.clipboard.writeText('${url}'); const o = this.innerHTML; this.innerHTML = '<svg class=\\'w-4 h-4 text-emerald-400\\' fill=\\'none\\' viewBox=\\'0 0 24 24\\' stroke=\\'currentColor\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\'/></svg>'; setTimeout(() => this.innerHTML = o, 2000);" class="inline-flex items-center justify-center p-1.5 bg-black/20 hover:bg-black/40 border border-white/10 rounded-lg shadow-sm text-gray-300 hover:text-white transition-all active:scale-95" title="Copy Backup Link">
    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
- </button>
+ </button>${editBtnHtml}
 </span>`;
 }
 
@@ -532,12 +553,13 @@ if (!treeRes.ok) throw await extractGitHubError(treeRes, `GitHub API Error: Coul
 
 const treeData = await treeRes.json();
 
-// Rigorous filter: Skip blobs that are non-text / binary (images, fonts, zips, media)
+// Rigorous filter: Skip blobs that are non-text / binary (images, fonts, zips, media) and lockfiles
 const fileNodes = treeData.tree.filter(item => {
  if (item.type !== 'blob') return false;
- if (item.path.startsWith('updater/')) return false;
+ if (item.path.startsWith('updater/') || item.path.startsWith('node_modules/')) return false;
+ if (['bun.lock', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'].includes(item.path)) return false;
  
- const imageAndBinaryRegex = /\.(png|jpe?g|gif|svg|ico|webp|pdf|zip|tar|gz|mp3|mp4|mov|avi|ttf|woff|woff2|eot|bin|exe|dll|psd|ai|sketch|wav|ogg)$/i;
+ const imageAndBinaryRegex = /\.(png|jpe?g|gif|svg|ico|webp|pdf|zip|tar|gz|mp3|mp4|mov|avi|ttf|woff|woff2|eot|bin|exe|dll|psd|ai|sketch|wav|ogg|lockb)$/i;
  if (item.path.match(imageAndBinaryRegex)) return false;
  
  return true;
@@ -631,7 +653,7 @@ if (!res.ok) throw await extractGitHubError(res, "GitHub API Error: Failed to up
 return newCommitSha;
 }
 
-async function pollWorkflowStatus(repo, token, commitSha, backupUrl = null) {
+async function pollWorkflowStatus(repo, token, commitSha, backupUrl = null, backupId = null, backupName = null) {
 const headers = { 
  "Authorization": `Bearer ${token}`, 
  "Accept": "application/vnd.github.v3+json"
@@ -642,7 +664,7 @@ let attempts = 0;
 const maxAttempts = 60; // Up to 5 minutes
 let runId = null;
 
-const linkHtml = backupUrl ? `<div class="mt-3 flex justify-center items-center">${generateBackupLinkHtml(backupUrl, "View Linked Backup Document &nearr;")}</div>` : '';
+const linkHtml = backupUrl ? `<div class="mt-3 flex justify-center items-center">${generateBackupLinkHtml(backupUrl, "View Linked Backup Document &nearr;", backupId, backupName)}</div>` : '';
 
 setStatus(`GitHub Action triggers starting... Waiting for workflow to queue.${linkHtml}`, 'info');
 
@@ -723,6 +745,131 @@ while ((match = fileRegex.exec(rawContent)) !== null) {
 return files;
 }
 
+// --- BACKUP NAME MODAL & RENAME HELPERS ---
+function showBackupNameModal({ initialName, defaultName, title = "Set Backup Name", subtitle = "The default naming convention is pre-filled below. You can keep it or edit the name before continuing.", confirmLabel = "Confirm & Backup" }) {
+ return new Promise((resolve) => {
+   const overlay = document.createElement('div');
+   overlay.className = 'fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm';
+   overlay.innerHTML = `
+     <div class="bg-darksurface border border-darkborder rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
+       <div class="px-5 py-4 border-b border-darkborder bg-white/5 flex justify-between items-center">
+         <div class="flex items-center gap-2.5">
+           <svg class="w-5 h-5 text-indigo-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+           <h3 class="font-bold text-gray-200 text-base">${escapeHtmlAttr(title)}</h3>
+         </div>
+         <button type="button" id="backup-name-close" class="text-gray-400 hover:text-white transition rounded-lg p-1 hover:bg-white/10">
+           <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+         </button>
+       </div>
+       <div class="p-5 space-y-4">
+         <p class="text-xs text-gray-400 leading-relaxed">${escapeHtmlAttr(subtitle)}</p>
+         <div class="space-y-1.5">
+           <div class="flex justify-between items-center">
+             <label for="backup-name-input" class="font-semibold text-xs text-gray-300">Backup Document Name</label>
+             <div class="flex items-center gap-2">
+               <button type="button" id="backup-name-reset" class="text-[11px] text-indigo-400 hover:text-indigo-300 font-semibold transition cursor-pointer">Reset Default</button>
+             </div>
+           </div>
+           <input type="text" id="backup-name-input" class="w-full border-2 border-darkborder rounded-xl py-2.5 px-4 bg-darkinput text-white outline-none focus:border-indigo-500 transition text-sm shadow-inner" value="${escapeHtmlAttr(initialName || defaultName)}" placeholder="Enter backup name...">
+         </div>
+       </div>
+       <div class="px-5 py-3.5 border-t border-darkborder bg-white/5 flex justify-end gap-2.5">
+         <button type="button" id="backup-name-cancel" class="px-4 py-2 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-white/5 transition">Cancel</button>
+         <button type="button" id="backup-name-confirm" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-xl text-sm font-semibold transition shadow-lg">${escapeHtmlAttr(confirmLabel)}</button>
+       </div>
+     </div>
+   `;
+   document.body.appendChild(overlay);
+
+   const inputEl = overlay.querySelector('#backup-name-input');
+   const resetBtn = overlay.querySelector('#backup-name-reset');
+   const cancelBtn = overlay.querySelector('#backup-name-cancel');
+   const closeBtn = overlay.querySelector('#backup-name-close');
+   const confirmBtn = overlay.querySelector('#backup-name-confirm');
+
+   // Focus input and place cursor at the end so the default name remains visible and editable
+   setTimeout(() => {
+     inputEl.focus();
+     const len = inputEl.value.length;
+     inputEl.setSelectionRange(len, len);
+   }, 10);
+
+   const cleanup = (val) => {
+     overlay.remove();
+     resolve(val);
+   };
+
+   resetBtn.addEventListener('click', () => {
+     inputEl.value = defaultName;
+     inputEl.focus();
+     const len = inputEl.value.length;
+     inputEl.setSelectionRange(len, len);
+   });
+
+   const submitVal = () => {
+     const trimmed = inputEl.value.trim();
+     cleanup(trimmed || defaultName);
+   };
+
+   confirmBtn.addEventListener('click', submitVal);
+   inputEl.addEventListener('keydown', (e) => {
+     if (e.key === 'Enter') {
+       e.preventDefault();
+       submitVal();
+     } else if (e.key === 'Escape') {
+       e.preventDefault();
+       cleanup(null);
+     }
+   });
+   cancelBtn.addEventListener('click', () => cleanup(null));
+   closeBtn.addEventListener('click', () => cleanup(null));
+   overlay.addEventListener('click', (e) => {
+     if (e.target === overlay) cleanup(null);
+   });
+ });
+}
+
+window.triggerEditBackupName = async function(fileId, currentName, triggerBtn = null) {
+ if (!fileId) return;
+ const repoVal = document.getElementById('gh-repo')?.value || APP_CONFIG?.TARGET_REPO || 'App';
+ const defaultName = getDefaultBackupName(repoVal);
+ const newName = await showBackupNameModal({
+   initialName: currentName || defaultName,
+   defaultName: defaultName,
+   title: "Edit Backup Name",
+   subtitle: "Edit the name of this backup document in Google Drive.",
+   confirmLabel: "Save Name"
+ });
+
+ if (!newName || newName === currentName) return;
+
+ try {
+   setStatus(`Updating backup name to "${escapeHtmlAttr(newName)}"...`, "info");
+   const res = await gasCall(GAS_WEB_APP_URL, {
+     action: 'renameBackup',
+     fileId: fileId,
+     newName: newName
+   });
+   const updatedName = res.name || newName;
+   if (triggerBtn) {
+     triggerBtn.dataset.backupName = updatedName;
+   }
+   // Also sync rollback dropdown option if this backup is currently in the list
+   const select = document.getElementById('rollback-select');
+   if (select) {
+     const opt = Array.from(select.options).find(o => o.value === fileId);
+     if (opt) {
+       opt.dataset.name = updatedName;
+       const timePrefix = opt.dataset.timeStr ? `${opt.dataset.timeStr} - ` : '';
+       opt.textContent = `${timePrefix}${updatedName}`;
+     }
+   }
+   setStatus(`Backup renamed to "${escapeHtmlAttr(updatedName)}"! ${res.url ? generateBackupLinkHtml(res.url, "View on Google Drive &nearr;", fileId, updatedName) : ''}`, "success");
+ } catch (err) {
+   setStatus(`Failed to rename backup: ${err.message}`, "error");
+ }
+};
+
 // --- CORE ACTIONS ---
 
 // 1. UPDATE PUSH FLOW
@@ -738,10 +885,27 @@ try {
  const files = parsePayloadContent(payloadInput);
  if (files.length === 0) throw new Error("No valid files parsed. Ensure you copied the exact format.");
 
+ const repoNameStr = config.repo.split('/').pop() || config.repo;
+ let customBackupName = null;
+
+ if (!config.skipBackup) {
+     const defaultBackupName = getDefaultBackupName(repoNameStr);
+     customBackupName = await showBackupNameModal({
+         initialName: defaultBackupName,
+         defaultName: defaultBackupName,
+         title: "Set Auto-Backup Name",
+         subtitle: "The default naming convention is pre-filled below. Edit the name if desired before backing up and pushing code.",
+         confirmLabel: "Backup & Push Code"
+     });
+     if (customBackupName === null) return;
+ }
+
  submitBtn.disabled = true;
  btnSpinner.classList.remove('hidden');
  
  let backupUrl = null;
+ let backupId = null;
+ let finalBackupName = customBackupName;
 
  if (!config.skipBackup) {
      setStatus("Fetching full repository tree to create a Drive backup...", "info");
@@ -749,10 +913,18 @@ try {
      
      const { fileNodes, compiledFiles } = await fetchAllRepoFiles(config.repo, config.branch, config.token);
      const hierarchy = fileNodes.map(f => f.path).join('\n');
-     const repoNameStr = config.repo.split('/').pop() || config.repo;
      
-     const backupData = await gasCall(config.gasUrl, { action: 'backupCode', folderId: config.folderId, hierarchy, files: compiledFiles, repoName: repoNameStr });
+     const backupData = await gasCall(config.gasUrl, {
+         action: 'backupCode',
+         folderId: config.folderId,
+         hierarchy,
+         files: compiledFiles,
+         repoName: repoNameStr,
+         backupName: customBackupName
+     });
      backupUrl = backupData.url;
+     backupId = backupData.id || null;
+     finalBackupName = backupData.name || customBackupName;
 
      setStatus(`Backup successful! Pushing new code to GitHub...`, "info");
      updateBtnText.textContent = "Step 2/2: Pushing Update...";
@@ -769,7 +941,7 @@ try {
  btnSpinner.classList.add('hidden');
  toggleBtnText();
 
- pollWorkflowStatus(config.repo, config.token, newCommitSha, backupUrl);
+ pollWorkflowStatus(config.repo, config.token, newCommitSha, backupUrl, backupId, finalBackupName);
 
 } catch (err) {
  setStatus(err.message, "error");
@@ -787,6 +959,17 @@ const btnSpinner = document.getElementById('manual-backup-btn-spinner');
 
 try {
  const config = getConfig();
+ const repoNameStr = config.repo.split('/').pop() || config.repo;
+ const defaultBackupName = getDefaultBackupName(repoNameStr);
+ const customBackupName = await showBackupNameModal({
+     initialName: defaultBackupName,
+     defaultName: defaultBackupName,
+     title: "Set Backup Name",
+     subtitle: "The default naming convention is pre-filled below. You can edit the name before creating the manual backup.",
+     confirmLabel: "Create Manual Backup"
+ });
+ if (customBackupName === null) return;
+
  btn.disabled = true;
  btnSpinner.classList.remove('hidden');
  btnText.textContent = "Backing up repository...";
@@ -794,11 +977,18 @@ try {
  
  const { fileNodes, compiledFiles } = await fetchAllRepoFiles(config.repo, config.branch, config.token);
  const hierarchy = fileNodes.map(f => f.path).join('\n');
- const repoNameStr = config.repo.split('/').pop() || config.repo;
  
- const backupData = await gasCall(config.gasUrl, { action: 'backupCode', folderId: config.folderId, hierarchy, files: compiledFiles, repoName: repoNameStr });
+ const backupData = await gasCall(config.gasUrl, {
+     action: 'backupCode',
+     folderId: config.folderId,
+     hierarchy,
+     files: compiledFiles,
+     repoName: repoNameStr,
+     backupName: customBackupName
+ });
+ const createdName = backupData.name || customBackupName;
  
- setStatus(`Manual Backup successful! ${generateBackupLinkHtml(backupData.url)}`, "success");
+ setStatus(`Manual Backup "${escapeHtmlAttr(createdName)}" successful! ${generateBackupLinkHtml(backupData.url, "View on Google Drive &nearr;", backupData.id, createdName)}`, "success");
  
 } catch(err) {
  setStatus(err.message, "error");
@@ -809,7 +999,7 @@ try {
 }
 });
 
-// 3. LOAD BACKUPS FLOW
+// 3. LOAD BACKUPS FLOW & EDIT SELECTED BACKUP NAME
 document.getElementById('load-backups-btn').addEventListener('click', async () => {
 const btn = document.getElementById('load-backups-btn');
 const btnText = document.getElementById('load-btn-text');
@@ -835,12 +1025,14 @@ try {
      const dateStr = new Date(b.time).toLocaleString();
      const option = document.createElement('option');
      option.value = b.id;
+     option.dataset.name = b.name;
+     option.dataset.timeStr = dateStr;
      option.textContent = `${dateStr} - ${b.name}`;
      select.appendChild(option);
  });
 
  rbContainer.classList.remove('hidden');
- setStatus(`Loaded ${data.backups.length} backups. Select one and perform rollback.`, "success");
+ setStatus(`Loaded ${data.backups.length} backups. Select one to edit its name or perform rollback.`, "success");
 
 } catch(err) {
  setStatus(err.message, "error");
@@ -851,6 +1043,50 @@ try {
 }
 });
 
+const editBackupNameBtn = document.getElementById('edit-backup-name-btn');
+if (editBackupNameBtn) {
+ editBackupNameBtn.addEventListener('click', async () => {
+   const select = document.getElementById('rollback-select');
+   const selectedOption = select?.selectedOptions?.[0];
+   if (!selectedOption || !selectedOption.value) {
+     setStatus("Please select a backup version first.", "error");
+     return;
+   }
+   const fileId = selectedOption.value;
+   const currentName = selectedOption.dataset.name || selectedOption.textContent;
+   await window.triggerEditBackupName(fileId, currentName);
+ });
+}
+
+// Iframe-safe confirmation helper (works on both Google AI Studio and GitHub Pages)
+function showConfirmModal(message) {
+ return new Promise((resolve) => {
+   const overlay = document.createElement('div');
+   overlay.className = 'fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm';
+   overlay.innerHTML = `
+     <div class="bg-darksurface border border-darkborder rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+       <div class="px-5 py-4 border-b border-darkborder bg-white/5 flex items-center gap-2.5">
+         <svg class="w-5 h-5 text-rose-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+         <h3 class="font-bold text-gray-200 text-base">Confirm Rollback</h3>
+       </div>
+       <div class="p-5 text-sm text-gray-300 leading-relaxed">${message}</div>
+       <div class="px-5 py-3.5 border-t border-darkborder bg-white/5 flex justify-end gap-2.5">
+         <button type="button" id="confirm-modal-cancel" class="px-4 py-2 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-white/5 transition">Cancel</button>
+         <button type="button" id="confirm-modal-ok" class="bg-rose-600 hover:bg-rose-500 text-white px-5 py-2 rounded-xl text-sm font-semibold transition">Confirm Rollback</button>
+       </div>
+     </div>
+   `;
+   document.body.appendChild(overlay);
+   const cleanup = (result) => {
+     overlay.remove();
+     resolve(result);
+   };
+   overlay.querySelector('#confirm-modal-cancel').addEventListener('click', () => cleanup(false));
+   overlay.querySelector('#confirm-modal-ok').addEventListener('click', () => cleanup(true));
+   overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(false); });
+ });
+}
+
 // 4. EXECUTE ROLLBACK FLOW
 document.getElementById('rollback-btn').addEventListener('click', async () => {
 const btn = document.getElementById('rollback-btn');
@@ -859,7 +1095,8 @@ const btnSpinner = document.getElementById('rb-btn-spinner');
 const select = document.getElementById('rollback-select');
 const fileId = select.value;
 
-if (!confirm("Are you absolutely sure you want to rollback the repository to this specific version? This will push the backup contents over your current files.")) return;
+const confirmed = await showConfirmModal("Are you absolutely sure you want to rollback the repository to this specific version? This will push the backup contents over your current files.");
+if (!confirmed) return;
 
 try {
  const config = getConfig();
@@ -909,6 +1146,17 @@ promoteBtn.addEventListener('click', async () => {
  if (sourceRepo === targetRepo) return setStatus("Source and Target repositories cannot be the same.", "error");
  if (!token || !folderId) return setStatus("Token and Google Drive Folder are required in Step 1.", "error");
 
+ const targetRepoNameStr = targetRepo.split('/').pop();
+ const defaultBackupName = getDefaultBackupName(targetRepoNameStr);
+ const customBackupName = await showBackupNameModal({
+     initialName: defaultBackupName,
+     defaultName: defaultBackupName,
+     title: "Set Target Backup Name",
+     subtitle: `Set the backup name for ${targetRepoNameStr} before promoting code from ${sourceRepo.split('/').pop()}.`,
+     confirmLabel: "Backup Target & Promote"
+ });
+ if (customBackupName === null) return;
+
  const btnText = document.getElementById('promote-btn-text');
  const btnSpinner = document.getElementById('promote-btn-spinner');
  
@@ -939,7 +1187,6 @@ promoteBtn.addEventListener('click', async () => {
      btnText.textContent = "Step 2/3: Backing up Target...";
      const { fileNodes: targetNodes, compiledFiles: targetFiles } = await fetchAllRepoFiles(targetRepo, branch, token);
      const hierarchy = targetNodes.map(f => f.path).join('\n');
-     const targetRepoNameStr = targetRepo.split('/').pop();
      
      setStatus(`Transmitting ${targetRepo} backup to Google Drive...`, 'info');
      const backupData = await gasCall(GAS_WEB_APP_URL, { 
@@ -947,8 +1194,10 @@ promoteBtn.addEventListener('click', async () => {
          folderId, 
          hierarchy, 
          files: targetFiles, 
-         repoName: targetRepoNameStr 
+         repoName: targetRepoNameStr,
+         backupName: customBackupName
      });
+     const createdName = backupData.name || customBackupName;
 
      // 4. Push directly to Target
      setStatus(`Target backup successful! Pushing promoted code to ${targetRepo}...`, 'info');
@@ -963,7 +1212,7 @@ promoteBtn.addEventListener('click', async () => {
      );
 
      // 5. Monitor
-     pollWorkflowStatus(targetRepo, token, newCommitSha, backupData.url);
+     pollWorkflowStatus(targetRepo, token, newCommitSha, backupData.url, backupData.id, createdName);
      
  } catch (err) {
      setStatus(err.message, "error");
@@ -997,6 +1246,17 @@ if (!targetRepo || !targetFolderId || !targetBranch) {
  return;
 }
 
+const repoNameStr = targetRepo.split('/').pop();
+const defaultBackupName = getDefaultBackupName(repoNameStr);
+const customBackupName = await showBackupNameModal({
+ initialName: defaultBackupName,
+ defaultName: defaultBackupName,
+ title: `Set System Backup Name`,
+ subtitle: "The default naming convention is pre-filled below. You can edit the name before creating the system backup.",
+ confirmLabel: "Create System Backup"
+});
+if (customBackupName === null) return;
+
 try {
  btn.disabled = true;
  btnSpinner.classList.remove('hidden');
@@ -1005,7 +1265,6 @@ try {
  
  const { fileNodes, compiledFiles } = await fetchAllRepoFiles(targetRepo, targetBranch, token);
  const hierarchy = fileNodes.map(f => f.path).join('\n');
- const repoNameStr = targetRepo.split('/').pop();
  
  setStatus("Compiling files and securely transmitting to Google Drive...", "info");
 
@@ -1014,10 +1273,12 @@ try {
      folderId: targetFolderId, 
      hierarchy, 
      files: compiledFiles, 
-     repoName: repoNameStr 
+     repoName: repoNameStr,
+     backupName: customBackupName
  });
+ const createdName = backupData.name || customBackupName;
  
- setStatus(`System Tool Backup successful! ${generateBackupLinkHtml(backupData.url)}`, "success");
+ setStatus(`System Tool Backup "${escapeHtmlAttr(createdName)}" successful! ${generateBackupLinkHtml(backupData.url, "View on Google Drive &nearr;", backupData.id, createdName)}`, "success");
  
 } catch(err) {
  setStatus("System Backup Error: " + err.message, "error");
