@@ -28,7 +28,6 @@ navigator.serviceWorker.register('sw.js').catch(err => console.log('SW setup ski
 });
 }
 </script>
-<script src="https://accounts.google.com/gsi/client"></script>
 </head>
 <body class="min-h-screen relative antialiased selection:bg-indigo-500/30">
 <div class="max-w-4xl mx-auto w-full p-4 md:p-8 space-y-6 md:space-y-8">
@@ -69,7 +68,6 @@ navigator.serviceWorker.register('sw.js').catch(err => console.log('SW setup ski
 <div class="space-y-1.5 flex flex-col justify-start">
 <label class="font-semibold text-xs text-gray-400 flex justify-between mb-1.5">
 <span>Google Drive Backup Folder</span>
-<button type="button" id="btn-auth-drive" class="text-[10px] bg-blue-600 hover:bg-blue-500 text-white px-2 py-0.5 rounded shadow transition cursor-pointer z-10">Connect Drive</button>
 <span class="text-indigo-400/70 text-[10px] uppercase tracking-wider">Saved locally</span>
 </label>
 <div class="relative flex">
@@ -328,6 +326,6 @@ Select Drive Folder
 </div>
 </div>
 <script src="backend/config.js"></script>
-<script type="module" src="updater.js"></script>
+<script src="updater.js"></script>
 </body>
 </html>
