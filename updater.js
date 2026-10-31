@@ -1131,96 +1131,691 @@ try {
 }
 });
 
-// 5. ENVIRONMENT PROMOTION (CI/CD) FLOW
+// 5. ENVIRONMENT PROMOTION (CI/CD) FLOW & SOURCE REPO BROWSER
+const promoteSpecificOnly = document.getElementById('promote-specific-only');
+const promoteSpecificContainer = document.getElementById('promote-specific-container');
+const promoteSpecificFilesInput = document.getElementById('promote-specific-files');
+const promoteSpecificCount = document.getElementById('promote-specific-count');
+const promoteSelectedChips = document.getElementById('promote-selected-chips');
+const promoteExcludeContainer = document.getElementById('promote-exclude-container');
+const btnBrowseSourceRepo = document.getElementById('btn-browse-source-repo');
+const btnBrowseSourceInline = document.getElementById('btn-browse-source-inline');
+const btnClearSpecificFiles = document.getElementById('btn-clear-specific-files');
+
+// Repo Browser Modal DOM
+const repoBrowserModal = document.getElementById('repo-browser-modal');
+const repoBrowserContent = document.getElementById('repo-browser-content');
+const repoBrowserSubtitle = document.getElementById('repo-browser-subtitle');
+const btnCloseRepoModal = document.getElementById('btn-close-repo-modal');
+const btnCancelRepoModal = document.getElementById('btn-cancel-repo-modal');
+const btnConfirmRepoModal = document.getElementById('btn-confirm-repo-modal');
+const btnRepoUp = document.getElementById('btn-repo-up');
+const repoBreadcrumbs = document.getElementById('repo-breadcrumbs');
+const btnRepoSelectDir = document.getElementById('btn-repo-select-dir');
+const repoFileSearch = document.getElementById('repo-file-search');
+const btnClearRepoSearch = document.getElementById('btn-clear-repo-search');
+const repoBrowserLoading = document.getElementById('repo-browser-loading');
+const repoBrowserList = document.getElementById('repo-browser-list');
+const repoSelectedInfo = document.getElementById('repo-selected-info');
+const btnRepoClearSelection = document.getElementById('btn-repo-clear-selection');
+
+let repoBrowserTreeCache = { repo: '', branch: '', files: [] };
+let currentRepoDir = '';
+let modalSelectedFiles = new Set();
+
+function normalizeRepoFilePath(rawPath) {
+    return String(rawPath || '')
+        .trim()
+        .replace(/\\/g, '/')
+        .replace(/^(\.\/|\/)+/, '');
+}
+
+function getSelectedPromoteFiles() {
+    if (!promoteSpecificFilesInput) return [];
+    const seen = new Set();
+    const result = [];
+    promoteSpecificFilesInput.value
+        .split(',')
+        .map(normalizeRepoFilePath)
+        .filter(Boolean)
+        .forEach(p => {
+            if (!p.toLowerCase().startsWith('.github/') && !seen.has(p)) {
+                seen.add(p);
+                result.push(p);
+            }
+        });
+    return result;
+}
+
+function setSelectedPromoteFiles(pathsArray) {
+    const seen = new Set();
+    const clean = [];
+    (pathsArray || []).map(normalizeRepoFilePath).filter(Boolean).forEach(p => {
+        if (!p.toLowerCase().startsWith('.github/') && !seen.has(p)) {
+            seen.add(p);
+            clean.push(p);
+        }
+    });
+    if (promoteSpecificFilesInput) {
+        promoteSpecificFilesInput.value = clean.join(', ');
+    }
+    syncPromoteSpecificUI(clean);
+}
+
+function updatePromoteButtonLabel() {
+    const btnText = document.getElementById('promote-btn-text');
+    if (!btnText) return;
+    if (promoteSpecificOnly && promoteSpecificOnly.checked) {
+        const count = getSelectedPromoteFiles().length;
+        btnText.textContent = count > 0
+            ? `Promote ${count} Selected File${count === 1 ? '' : 's'} & Auto-Backup Target`
+            : 'Promote Specific Files & Auto-Backup Target';
+    } else {
+        btnText.textContent = 'Promote Code & Auto-Backup Target';
+    }
+}
+
+function syncPromoteSpecificUI(filesList = null) {
+    const list = filesList !== null ? filesList : getSelectedPromoteFiles();
+    if (promoteSpecificCount) {
+        promoteSpecificCount.textContent = `${list.length} selected`;
+    }
+    if (promoteSelectedChips) {
+        promoteSelectedChips.innerHTML = '';
+        list.forEach(filePath => {
+            const chip = document.createElement('span');
+            chip.className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-purple-950/60 border border-purple-500/30 text-purple-200 text-[11px] font-mono';
+            chip.innerHTML = `
+                <span class="truncate max-w-[240px]" title="${escapeHtmlAttr(filePath)}">${escapeHtmlAttr(filePath)}</span>
+                <button type="button" class="text-purple-400 hover:text-rose-400 transition ml-0.5 cursor-pointer" title="Remove file">&times;</button>
+            `;
+            chip.querySelector('button').addEventListener('click', () => {
+                const updated = getSelectedPromoteFiles().filter(item => item !== filePath);
+                setSelectedPromoteFiles(updated);
+            });
+            promoteSelectedChips.appendChild(chip);
+        });
+    }
+    updatePromoteButtonLabel();
+}
+
+function updatePromoteModeUI() {
+    if (!promoteSpecificOnly) return;
+    if (promoteSpecificOnly.checked) {
+        promoteSpecificContainer.classList.remove('hidden');
+        if (promoteExcludeContainer) promoteExcludeContainer.classList.add('opacity-50');
+    } else {
+        promoteSpecificContainer.classList.add('hidden');
+        if (promoteExcludeContainer) promoteExcludeContainer.classList.remove('opacity-50');
+    }
+    syncPromoteSpecificUI();
+}
+
+if (promoteSpecificOnly) {
+    promoteSpecificOnly.addEventListener('change', updatePromoteModeUI);
+}
+
+if (promoteSpecificFilesInput) {
+    promoteSpecificFilesInput.addEventListener('input', () => {
+        syncPromoteSpecificUI();
+    });
+    promoteSpecificFilesInput.addEventListener('change', () => {
+        setSelectedPromoteFiles(getSelectedPromoteFiles());
+    });
+}
+
+if (btnClearSpecificFiles) {
+    btnClearSpecificFiles.addEventListener('click', () => {
+        setSelectedPromoteFiles([]);
+    });
+}
+
+promoteSource.addEventListener('change', () => {
+    repoBrowserTreeCache = { repo: '', branch: '', files: [] };
+});
+
+function formatFileSize(bytes) {
+    if (typeof bytes !== 'number' || isNaN(bytes)) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function openRepoBrowserModal() {
+    const sourceRepo = promoteSource.value;
+    const token = tokenInput.value.trim();
+    const branch = branchInput.value.trim() || 'main';
+
+    if (!token) {
+        setStatus("Please enter your GitHub Fine-Grained Token in Step 1 first.", "error");
+        return;
+    }
+    if (!sourceRepo) {
+        setStatus("Please select a Source Repository in Step 4 before browsing files.", "error");
+        return;
+    }
+
+    if (promoteSpecificOnly && !promoteSpecificOnly.checked) {
+        promoteSpecificOnly.checked = true;
+        updatePromoteModeUI();
+    }
+
+    modalSelectedFiles = new Set(getSelectedPromoteFiles());
+    currentRepoDir = '';
+    if (repoFileSearch) repoFileSearch.value = '';
+    if (btnClearRepoSearch) btnClearRepoSearch.classList.add('hidden');
+    if (repoBrowserSubtitle) repoBrowserSubtitle.textContent = `${sourceRepo} (${branch})`;
+
+    repoBrowserModal.classList.remove('hidden');
+    void repoBrowserModal.offsetWidth;
+    repoBrowserModal.classList.remove('opacity-0');
+    repoBrowserContent.classList.remove('scale-95', 'opacity-0');
+    repoBrowserContent.classList.add('scale-100', 'opacity-100');
+
+    updateModalSelectionSummary();
+
+    if (repoBrowserTreeCache.repo === sourceRepo && repoBrowserTreeCache.branch === branch && repoBrowserTreeCache.files.length > 0) {
+        renderRepoBrowserView();
+        return;
+    }
+
+    repoBrowserLoading.classList.remove('hidden');
+    repoBrowserList.innerHTML = '';
+
+    try {
+        const res = await fetch(`https://api.github.com/repos/${sourceRepo}/git/trees/${branch}?recursive=1`, {
+            headers: { "Authorization": `Bearer ${token}` }
+        });
+        if (!res.ok) throw await extractGitHubError(res, `Failed to load file tree from ${sourceRepo}`);
+        const treeData = await res.json();
+
+        const validBlobs = (treeData.tree || []).filter(item => {
+            if (item.type !== 'blob') return false;
+            const lower = item.path.toLowerCase();
+            if (lower.startsWith('.github/') || lower.startsWith('node_modules/')) return false;
+            return true;
+        });
+
+        repoBrowserTreeCache = {
+            repo: sourceRepo,
+            branch: branch,
+            files: validBlobs
+        };
+
+        renderRepoBrowserView();
+    } catch (err) {
+        setStatus(err.message, "error");
+        repoBrowserList.innerHTML = `<div class="p-6 text-center text-xs text-rose-400">${escapeHtmlAttr(err.message)}</div>`;
+    } finally {
+        repoBrowserLoading.classList.add('hidden');
+    }
+}
+
+function closeRepoBrowserModal() {
+    repoBrowserModal.classList.add('opacity-0');
+    repoBrowserContent.classList.remove('scale-100', 'opacity-100');
+    repoBrowserContent.classList.add('scale-95', 'opacity-0');
+    setTimeout(() => {
+        repoBrowserModal.classList.add('hidden');
+    }, 200);
+}
+
+function updateModalSelectionSummary() {
+    const count = modalSelectedFiles.size;
+    if (repoSelectedInfo) {
+        repoSelectedInfo.textContent = `${count} file${count === 1 ? '' : 's'} selected`;
+        repoSelectedInfo.className = count > 0
+            ? 'text-xs font-semibold text-purple-300'
+            : 'text-xs font-semibold text-gray-400';
+    }
+    if (btnRepoClearSelection) {
+        btnRepoClearSelection.classList.toggle('hidden', count === 0);
+    }
+}
+
+function getFilesInDirectoryScope(dirPrefix, searchQuery = '') {
+    const allFiles = repoBrowserTreeCache.files || [];
+    const query = searchQuery.trim().toLowerCase();
+    if (query) {
+        return allFiles.filter(f => f.path.toLowerCase().includes(query));
+    }
+    if (!dirPrefix) return allFiles;
+    const prefixWithSlash = dirPrefix.endsWith('/') ? dirPrefix : `${dirPrefix}/`;
+    return allFiles.filter(f => f.path.startsWith(prefixWithSlash));
+}
+
+function renderRepoBreadcrumbs() {
+    if (!repoBreadcrumbs) return;
+    repoBreadcrumbs.innerHTML = '';
+
+    const parts = currentRepoDir ? currentRepoDir.split('/') : [];
+    const rootBtn = document.createElement('button');
+    rootBtn.type = 'button';
+    rootBtn.className = `px-1.5 py-0.5 rounded hover:bg-white/10 transition cursor-pointer ${parts.length === 0 ? 'text-purple-300 font-bold' : 'text-gray-400 hover:text-white'}`;
+    rootBtn.textContent = 'root';
+    rootBtn.addEventListener('click', () => {
+        currentRepoDir = '';
+        renderRepoBrowserView();
+    });
+    repoBreadcrumbs.appendChild(rootBtn);
+
+    let accumulated = '';
+    parts.forEach((part, idx) => {
+        const sep = document.createElement('span');
+        sep.className = 'text-gray-600 select-none';
+        sep.textContent = '/';
+        repoBreadcrumbs.appendChild(sep);
+
+        accumulated = accumulated ? `${accumulated}/${part}` : part;
+        const targetDir = accumulated;
+        const isLast = idx === parts.length - 1;
+
+        const partBtn = document.createElement('button');
+        partBtn.type = 'button';
+        partBtn.className = `px-1.5 py-0.5 rounded hover:bg-white/10 transition cursor-pointer ${isLast ? 'text-purple-300 font-bold' : 'text-gray-400 hover:text-white'}`;
+        partBtn.textContent = part;
+        partBtn.addEventListener('click', () => {
+            currentRepoDir = targetDir;
+            renderRepoBrowserView();
+        });
+        repoBreadcrumbs.appendChild(partBtn);
+    });
+
+    if (btnRepoUp) {
+        btnRepoUp.disabled = !currentRepoDir;
+    }
+}
+
+function renderRepoBrowserView() {
+    renderRepoBreadcrumbs();
+    updateModalSelectionSummary();
+    repoBrowserList.innerHTML = '';
+
+    const allFiles = repoBrowserTreeCache.files || [];
+    const searchQuery = (repoFileSearch?.value || '').trim().toLowerCase();
+
+    const scopedFiles = getFilesInDirectoryScope(currentRepoDir, searchQuery);
+    const allScopedSelected = scopedFiles.length > 0 && scopedFiles.every(f => modalSelectedFiles.has(f.path));
+    if (btnRepoSelectDir) {
+        btnRepoSelectDir.textContent = allScopedSelected
+            ? (searchQuery ? 'Deselect Matches' : 'Deselect Folder')
+            : (searchQuery ? 'Select Matches' : 'Select Folder');
+        btnRepoSelectDir.disabled = scopedFiles.length === 0;
+    }
+
+    if (allFiles.length === 0) {
+        repoBrowserList.innerHTML = '<div class="p-6 text-center text-sm text-gray-500">No promotable files found in this repository.</div>';
+        return;
+    }
+
+    if (searchQuery) {
+        if (scopedFiles.length === 0) {
+            repoBrowserList.innerHTML = '<div class="p-6 text-center text-sm text-gray-500">No files match your filter.</div>';
+            return;
+        }
+        scopedFiles.sort((a, b) => a.path.localeCompare(b.path)).forEach(file => {
+            repoBrowserList.appendChild(createRepoFileRow(file, true));
+        });
+        return;
+    }
+
+    const prefix = currentRepoDir ? `${currentRepoDir}/` : '';
+    const subdirsMap = new Map();
+    const directFiles = [];
+
+    allFiles.forEach(file => {
+        if (prefix && !file.path.startsWith(prefix)) return;
+        const relativePath = prefix ? file.path.slice(prefix.length) : file.path;
+        const slashIdx = relativePath.indexOf('/');
+        if (slashIdx === -1) {
+            directFiles.push(file);
+        } else {
+            const folderName = relativePath.slice(0, slashIdx);
+            const fullFolderPath = prefix ? `${prefix}${folderName}` : folderName;
+            if (!subdirsMap.has(fullFolderPath)) {
+                subdirsMap.set(fullFolderPath, { name: folderName, path: fullFolderPath, files: [] });
+            }
+            subdirsMap.get(fullFolderPath).files.push(file);
+        }
+    });
+
+    const folders = Array.from(subdirsMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+    directFiles.sort((a, b) => a.path.localeCompare(b.path));
+
+    if (folders.length === 0 && directFiles.length === 0) {
+        repoBrowserList.innerHTML = '<div class="p-6 text-center text-sm text-gray-500">This directory is empty.</div>';
+        return;
+    }
+
+    folders.forEach(folder => {
+        const selectedInFolder = folder.files.filter(f => modalSelectedFiles.has(f.path)).length;
+        const allInFolderSelected = selectedInFolder === folder.files.length && folder.files.length > 0;
+        const someInFolderSelected = selectedInFolder > 0 && !allInFolderSelected;
+
+        const row = document.createElement('div');
+        row.className = `w-full flex items-center justify-between p-2.5 rounded-xl transition border cursor-pointer group ${selectedInFolder > 0 ? 'bg-purple-950/20 border-purple-500/30 hover:bg-purple-950/30' : 'hover:bg-white/5 border-transparent hover:border-white/10'}`;
+
+        row.innerHTML = `
+            <div class="flex items-center gap-3 overflow-hidden flex-grow">
+                <label class="flex items-center p-1 cursor-pointer folder-checkbox-wrap" title="Select all files in ${escapeHtmlAttr(folder.name)}">
+                    <input type="checkbox" class="w-4 h-4 rounded accent-purple-600 bg-darkinput border-darkborder cursor-pointer" ${allInFolderSelected ? 'checked' : ''}>
+                </label>
+                <svg class="w-5 h-5 shrink-0 ${selectedInFolder > 0 ? 'text-purple-400' : 'text-indigo-400/80 group-hover:text-indigo-300'}" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>
+                <span class="text-sm font-medium text-gray-200 group-hover:text-white truncate">${escapeHtmlAttr(folder.name)}</span>
+                <span class="text-[10px] font-mono px-2 py-0.5 rounded-md ${selectedInFolder > 0 ? 'bg-purple-900/60 text-purple-200 border border-purple-500/30' : 'bg-white/5 text-gray-400'}">
+                    ${selectedInFolder > 0 ? `${selectedInFolder}/${folder.files.length} selected` : `${folder.files.length} file${folder.files.length === 1 ? '' : 's'}`}
+                </span>
+            </div>
+            <div class="p-1.5 rounded-lg bg-black/20 group-hover:bg-black/40 text-gray-400 group-hover:text-white transition shrink-0" title="Open Folder">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+            </div>
+        `;
+
+        const checkbox = row.querySelector('input[type="checkbox"]');
+        if (someInFolderSelected) {
+            checkbox.indeterminate = true;
+        }
+
+        const checkboxWrap = row.querySelector('.folder-checkbox-wrap');
+        checkboxWrap.addEventListener('click', (e) => {
+            e.stopPropagation();
+        });
+        checkbox.addEventListener('change', (e) => {
+            e.stopPropagation();
+            if (checkbox.checked) {
+                folder.files.forEach(f => modalSelectedFiles.add(f.path));
+            } else {
+                folder.files.forEach(f => modalSelectedFiles.delete(f.path));
+            }
+            renderRepoBrowserView();
+        });
+
+        row.addEventListener('click', () => {
+            currentRepoDir = folder.path;
+            renderRepoBrowserView();
+        });
+
+        repoBrowserList.appendChild(row);
+    });
+
+    directFiles.forEach(file => {
+        repoBrowserList.appendChild(createRepoFileRow(file, false));
+    });
+}
+
+function createRepoFileRow(file, showFullPath = false) {
+    const isSelected = modalSelectedFiles.has(file.path);
+    const displayName = showFullPath ? file.path : file.path.split('/').pop();
+    const sizeLabel = formatFileSize(file.size);
+
+    const row = document.createElement('div');
+    row.className = `w-full flex items-center justify-between p-2.5 rounded-xl transition border cursor-pointer group ${isSelected ? 'bg-purple-900/30 border-purple-500/50' : 'hover:bg-white/5 border-transparent hover:border-white/10'}`;
+
+    row.innerHTML = `
+        <div class="flex items-center gap-3 overflow-hidden flex-grow">
+            <input type="checkbox" class="w-4 h-4 rounded accent-purple-600 bg-darkinput border-darkborder cursor-pointer shrink-0 pointer-events-none" ${isSelected ? 'checked' : ''}>
+            <svg class="w-4 h-4 shrink-0 ${isSelected ? 'text-purple-400' : 'text-gray-400 group-hover:text-gray-300'}" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+            <span class="text-xs md:text-sm font-mono ${isSelected ? 'text-white font-semibold' : 'text-gray-300 group-hover:text-white'} truncate" title="${escapeHtmlAttr(file.path)}">${escapeHtmlAttr(displayName)}</span>
+        </div>
+        <span class="text-[10px] font-mono text-gray-500 shrink-0 ml-2">${escapeHtmlAttr(sizeLabel)}</span>
+    `;
+
+    row.addEventListener('click', () => {
+        if (modalSelectedFiles.has(file.path)) {
+            modalSelectedFiles.delete(file.path);
+        } else {
+            modalSelectedFiles.add(file.path);
+        }
+        renderRepoBrowserView();
+    });
+
+    return row;
+}
+
+if (btnBrowseSourceRepo) btnBrowseSourceRepo.addEventListener('click', openRepoBrowserModal);
+if (btnBrowseSourceInline) btnBrowseSourceInline.addEventListener('click', openRepoBrowserModal);
+if (btnCloseRepoModal) btnCloseRepoModal.addEventListener('click', closeRepoBrowserModal);
+if (btnCancelRepoModal) btnCancelRepoModal.addEventListener('click', closeRepoBrowserModal);
+
+if (repoBrowserModal) {
+    repoBrowserModal.addEventListener('click', (e) => {
+        if (e.target === repoBrowserModal) closeRepoBrowserModal();
+    });
+}
+
+if (btnRepoUp) {
+    btnRepoUp.addEventListener('click', () => {
+        if (!currentRepoDir) return;
+        const parts = currentRepoDir.split('/');
+        parts.pop();
+        currentRepoDir = parts.join('/');
+        renderRepoBrowserView();
+    });
+}
+
+if (btnRepoSelectDir) {
+    btnRepoSelectDir.addEventListener('click', () => {
+        const searchQuery = (repoFileSearch?.value || '').trim().toLowerCase();
+        const scopedFiles = getFilesInDirectoryScope(currentRepoDir, searchQuery);
+        if (scopedFiles.length === 0) return;
+        const allScopedSelected = scopedFiles.every(f => modalSelectedFiles.has(f.path));
+        if (allScopedSelected) {
+            scopedFiles.forEach(f => modalSelectedFiles.delete(f.path));
+        } else {
+            scopedFiles.forEach(f => modalSelectedFiles.add(f.path));
+        }
+        renderRepoBrowserView();
+    });
+}
+
+if (repoFileSearch) {
+    repoFileSearch.addEventListener('input', () => {
+        const hasVal = repoFileSearch.value.trim().length > 0;
+        if (btnClearRepoSearch) btnClearRepoSearch.classList.toggle('hidden', !hasVal);
+        renderRepoBrowserView();
+    });
+}
+
+if (btnClearRepoSearch) {
+    btnClearRepoSearch.addEventListener('click', () => {
+        if (repoFileSearch) repoFileSearch.value = '';
+        btnClearRepoSearch.classList.add('hidden');
+        renderRepoBrowserView();
+    });
+}
+
+if (btnRepoClearSelection) {
+    btnRepoClearSelection.addEventListener('click', () => {
+        modalSelectedFiles.clear();
+        renderRepoBrowserView();
+    });
+}
+
+if (btnConfirmRepoModal) {
+    btnConfirmRepoModal.addEventListener('click', () => {
+        const selectedArray = Array.from(modalSelectedFiles).sort((a, b) => a.localeCompare(b));
+        if (promoteSpecificOnly) {
+            promoteSpecificOnly.checked = true;
+            updatePromoteModeUI();
+        }
+        setSelectedPromoteFiles(selectedArray);
+        closeRepoBrowserModal();
+    });
+}
+
+async function fetchSpecificRepoFiles(repo, branch, token, requestedPaths) {
+    const headers = { "Authorization": `Bearer ${token}` };
+    const treeRes = await fetch(`https://api.github.com/repos/${repo}/git/trees/${branch}?recursive=1`, { headers });
+    if (!treeRes.ok) throw await extractGitHubError(treeRes, `GitHub API Error: Could not fetch tree for branch '${branch}'`);
+
+    const treeData = await treeRes.json();
+    const blobMap = new Map();
+    (treeData.tree || []).forEach(item => {
+        if (item.type === 'blob') {
+            blobMap.set(item.path, item);
+        }
+    });
+
+    const missingPaths = [];
+    const targetNodes = [];
+    requestedPaths.forEach(reqPath => {
+        const clean = normalizeRepoFilePath(reqPath);
+        if (!clean || clean.toLowerCase().startsWith('.github/')) return;
+        const found = blobMap.get(clean);
+        if (!found) {
+            missingPaths.push(clean);
+        } else {
+            targetNodes.push(found);
+        }
+    });
+
+    if (missingPaths.length > 0) {
+        throw new Error(`The following selected file(s) were not found in ${repo} (${branch}): ${missingPaths.join(', ')}`);
+    }
+
+    const binaryRegex = /\.(png|jpe?g|gif|ico|webp|pdf|zip|tar|gz|mp3|mp4|mov|avi|ttf|woff|woff2|eot|bin|exe|dll|psd|ai|sketch|wav|ogg|lockb)$/i;
+    const compiledFiles = [];
+    const batchSize = 10;
+
+    for (let i = 0; i < targetNodes.length; i += batchSize) {
+        const batch = targetNodes.slice(i, i + batchSize);
+        const promises = batch.map(async file => {
+            const isBinary = binaryRegex.test(file.path);
+            if (isBinary) {
+                const contentRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${file.sha}`, {
+                    headers: { ...headers, "Accept": "application/vnd.github.v3+json" }
+                });
+                if (!contentRes.ok) throw await extractGitHubError(contentRes, `Failed to fetch binary blob for ${file.path}`);
+                const blobJson = await contentRes.json();
+                return {
+                    path: file.path,
+                    content: (blobJson.content || '').replace(/\s+/g, ''),
+                    encoding: 'base64'
+                };
+            } else {
+                const contentRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${file.sha}`, {
+                    headers: { ...headers, "Accept": "application/vnd.github.v3.raw" }
+                });
+                if (!contentRes.ok) throw await extractGitHubError(contentRes, `Failed to fetch raw blob for ${file.path}`);
+                return {
+                    path: file.path,
+                    content: await contentRes.text(),
+                    encoding: 'utf-8'
+                };
+            }
+        });
+        compiledFiles.push(...(await Promise.all(promises)));
+    }
+
+    return compiledFiles;
+}
+
 promoteBtn.addEventListener('click', async () => {
- const sourceRepo = promoteSource.value;
- const targetRepo = promoteTarget.value;
- const token = tokenInput.value.trim();
- const branch = branchInput.value.trim();
- 
- const folderInputVal = document.getElementById('gh-drive-folder').value.trim();
- const storedFolderId = document.getElementById('gh-drive-folder').dataset.folderId;
- const folderId = storedFolderId || extractFolderId(folderInputVal);
+    const sourceRepo = promoteSource.value;
+    const targetRepo = promoteTarget.value;
+    const token = tokenInput.value.trim();
+    const branch = branchInput.value.trim();
+    const isSpecificMode = promoteSpecificOnly && promoteSpecificOnly.checked;
+    const specificPaths = isSpecificMode ? getSelectedPromoteFiles() : [];
 
- if (!sourceRepo || !targetRepo) return setStatus("Source and Target repositories must be selected.", "error");
- if (sourceRepo === targetRepo) return setStatus("Source and Target repositories cannot be the same.", "error");
- if (!token || !folderId) return setStatus("Token and Google Drive Folder are required in Step 1.", "error");
+    const folderInputVal = document.getElementById('gh-drive-folder').value.trim();
+    const storedFolderId = document.getElementById('gh-drive-folder').dataset.folderId;
+    const folderId = storedFolderId || extractFolderId(folderInputVal);
 
- const targetRepoNameStr = targetRepo.split('/').pop();
- const defaultBackupName = getDefaultBackupName(targetRepoNameStr);
- const customBackupName = await showBackupNameModal({
-     initialName: defaultBackupName,
-     defaultName: defaultBackupName,
-     title: "Set Target Backup Name",
-     subtitle: `Set the backup name for ${targetRepoNameStr} before promoting code from ${sourceRepo.split('/').pop()}.`,
-     confirmLabel: "Backup Target & Promote"
- });
- if (customBackupName === null) return;
+    if (!sourceRepo || !targetRepo) return setStatus("Source and Target repositories must be selected.", "error");
+    if (sourceRepo === targetRepo) return setStatus("Source and Target repositories cannot be the same.", "error");
+    if (!token || !folderId) return setStatus("Token and Google Drive Folder are required in Step 1.", "error");
+    if (isSpecificMode && specificPaths.length === 0) {
+        return setStatus("Please select at least one file to promote using 'Browse Source Repo...' or enter file paths.", "error");
+    }
 
- const btnText = document.getElementById('promote-btn-text');
- const btnSpinner = document.getElementById('promote-btn-spinner');
- 
- try {
-     promoteBtn.disabled = true;
-     btnSpinner.classList.remove('hidden');
-     
-     // 1. Fetch Source
-     setStatus(`Fetching source files from ${sourceRepo}...`, 'info');
-     btnText.textContent = "Step 1/3: Fetching Source...";
-     const { compiledFiles: sourceFiles } = await fetchAllRepoFiles(sourceRepo, branch, token);
-     
-     // 2. Filter out .github/ and user exclusions
-     const excludedList = document.getElementById('promote-exclude').value.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-     const filteredSourceFiles = sourceFiles.filter(f => {
-         const lowerPath = f.path.toLowerCase();
-         // Strictly protect deployment pipelines and tokens
-         if (lowerPath.startsWith('.github/')) return false; 
-         // Apply user defined exclusions
-         if (excludedList.includes(lowerPath)) return false; 
-         return true;
-     });
+    const targetRepoNameStr = targetRepo.split('/').pop();
+    const sourceRepoNameStr = sourceRepo.split('/').pop();
+    const defaultBackupName = getDefaultBackupName(targetRepoNameStr);
+    const customBackupName = await showBackupNameModal({
+        initialName: defaultBackupName,
+        defaultName: defaultBackupName,
+        title: "Set Target Backup Name",
+        subtitle: isSpecificMode
+            ? `Set the backup name for ${targetRepoNameStr} before promoting ${specificPaths.length} selected file(s) from ${sourceRepoNameStr}.`
+            : `Set the backup name for ${targetRepoNameStr} before promoting code from ${sourceRepoNameStr}.`,
+        confirmLabel: "Backup Target & Promote"
+    });
+    if (customBackupName === null) return;
 
-     if (filteredSourceFiles.length === 0) throw new Error("No files left to promote after applying exclusions.");
+    const btnText = document.getElementById('promote-btn-text');
+    const btnSpinner = document.getElementById('promote-btn-spinner');
 
-     // 3. Backup Target for safety
-     setStatus(`Fetching target files to backup ${targetRepo}...`, 'info');
-     btnText.textContent = "Step 2/3: Backing up Target...";
-     const { fileNodes: targetNodes, compiledFiles: targetFiles } = await fetchAllRepoFiles(targetRepo, branch, token);
-     const hierarchy = targetNodes.map(f => f.path).join('\n');
-     
-     setStatus(`Transmitting ${targetRepo} backup to Google Drive...`, 'info');
-     const backupData = await gasCall(GAS_WEB_APP_URL, { 
-         action: 'backupCode', 
-         folderId, 
-         hierarchy, 
-         files: targetFiles, 
-         repoName: targetRepoNameStr,
-         backupName: customBackupName
-     });
-     const createdName = backupData.name || customBackupName;
+    try {
+        promoteBtn.disabled = true;
+        btnSpinner.classList.remove('hidden');
 
-     // 4. Push directly to Target
-     setStatus(`Target backup successful! Pushing promoted code to ${targetRepo}...`, 'info');
-     btnText.textContent = "Step 3/3: Pushing Update...";
-     const sourceRepoNameStr = sourceRepo.split('/').pop();
-     const newCommitSha = await pushCommitToGitHub(
-         targetRepo, 
-         branch, 
-         token, 
-         filteredSourceFiles, 
-         `Environment Promotion from ${sourceRepoNameStr}`
-     );
+        let filteredSourceFiles = [];
 
-     // 5. Monitor
-     pollWorkflowStatus(targetRepo, token, newCommitSha, backupData.url, backupData.id, createdName);
-     
- } catch (err) {
-     setStatus(err.message, "error");
- } finally {
-     promoteBtn.disabled = false;
-     btnSpinner.classList.add('hidden');
-     btnText.textContent = "Promote Code & Auto-Backup Target";
- }
+        if (isSpecificMode) {
+            // 1. Fetch only the selected specific files from Source
+            setStatus(`Fetching ${specificPaths.length} selected file(s) from ${sourceRepo}...`, 'info');
+            btnText.textContent = "Step 1/3: Fetching Selected Files...";
+            filteredSourceFiles = await fetchSpecificRepoFiles(sourceRepo, branch, token, specificPaths);
+        } else {
+            // 1. Fetch all files from Source
+            setStatus(`Fetching source files from ${sourceRepo}...`, 'info');
+            btnText.textContent = "Step 1/3: Fetching Source...";
+            const { compiledFiles: sourceFiles } = await fetchAllRepoFiles(sourceRepo, branch, token);
+
+            // 2. Filter out .github/ and user exclusions
+            const excludedList = document.getElementById('promote-exclude').value.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+            filteredSourceFiles = sourceFiles.filter(f => {
+                const lowerPath = f.path.toLowerCase();
+                if (lowerPath.startsWith('.github/')) return false;
+                if (excludedList.includes(lowerPath)) return false;
+                return true;
+            });
+        }
+
+        if (filteredSourceFiles.length === 0) throw new Error("No files left to promote after applying filters.");
+
+        // 3. Backup Target for safety
+        setStatus(`Fetching target files to backup ${targetRepo}...`, 'info');
+        btnText.textContent = "Step 2/3: Backing up Target...";
+        const { fileNodes: targetNodes, compiledFiles: targetFiles } = await fetchAllRepoFiles(targetRepo, branch, token);
+        const hierarchy = targetNodes.map(f => f.path).join('\n');
+
+        setStatus(`Transmitting ${targetRepo} backup to Google Drive...`, 'info');
+        const backupData = await gasCall(GAS_WEB_APP_URL, {
+            action: 'backupCode',
+            folderId,
+            hierarchy,
+            files: targetFiles,
+            repoName: targetRepoNameStr,
+            backupName: customBackupName
+        });
+        const createdName = backupData.name || customBackupName;
+
+        // 4. Push directly to Target
+        setStatus(`Target backup successful! Pushing ${filteredSourceFiles.length} file(s) to ${targetRepo}...`, 'info');
+        btnText.textContent = "Step 3/3: Pushing Update...";
+        const commitMsg = isSpecificMode
+            ? `Environment Promotion (${filteredSourceFiles.length} specific file${filteredSourceFiles.length === 1 ? '' : 's'}) from ${sourceRepoNameStr}`
+            : `Environment Promotion from ${sourceRepoNameStr}`;
+        const newCommitSha = await pushCommitToGitHub(
+            targetRepo,
+            branch,
+            token,
+            filteredSourceFiles,
+            commitMsg
+        );
+
+        // 5. Monitor
+        pollWorkflowStatus(targetRepo, token, newCommitSha, backupData.url, backupData.id, createdName);
+
+    } catch (err) {
+        setStatus(err.message, "error");
+    } finally {
+        promoteBtn.disabled = false;
+        btnSpinner.classList.add('hidden');
+        updatePromoteButtonLabel();
+    }
 });
 
 // 6. DEDICATED UPDATER BACKUP FLOW
@@ -1298,6 +1893,9 @@ const iconFileInput = document.getElementById('icon-file-input');
 const iconEnvSelect = document.getElementById('icon-env-select');
 const iconBgColor = document.getElementById('icon-bg-color');
 const bgColorIndicator = document.getElementById('bg-color-indicator');
+const bgColorPickerWrapper = document.getElementById('bg-color-picker-wrapper');
+const iconBgTransparent = document.getElementById('icon-bg-transparent');
+const btnBgTransparent = document.getElementById('btn-bg-transparent');
 const iconScale = document.getElementById('icon-scale');
 const iconX = document.getElementById('icon-x');
 const iconY = document.getElementById('icon-y');
@@ -1335,6 +1933,30 @@ let redoStack = [];
 let initialConfig = {};
 let isApplyingHistoryState = false;
 
+function updateBgColorUI(bgColor, isTransparent) {
+  if (bgColorIndicator) {
+      bgColorIndicator.style.backgroundColor = bgColor;
+  }
+  if (canvas512) {
+      canvas512.classList.toggle('bg-checkerboard', !!isTransparent);
+      canvas512.classList.toggle('bg-black/50', !isTransparent);
+  }
+  if (btnBgTransparent) {
+      btnBgTransparent.setAttribute('aria-pressed', isTransparent ? 'true' : 'false');
+      btnBgTransparent.classList.toggle('border-pink-500', !!isTransparent);
+      btnBgTransparent.classList.toggle('ring-2', !!isTransparent);
+      btnBgTransparent.classList.toggle('ring-pink-500/30', !!isTransparent);
+      btnBgTransparent.classList.toggle('border-darkborder', !isTransparent);
+  }
+  if (bgColorPickerWrapper) {
+      bgColorPickerWrapper.classList.toggle('border-pink-500', !isTransparent);
+      bgColorPickerWrapper.classList.toggle('ring-2', !isTransparent);
+      bgColorPickerWrapper.classList.toggle('ring-pink-500/30', !isTransparent);
+      bgColorPickerWrapper.classList.toggle('border-darkborder', !!isTransparent);
+      bgColorPickerWrapper.classList.toggle('opacity-60', !!isTransparent);
+  }
+}
+
 function captureIconState() {
   return {
       env: iconEnvSelect.value,
@@ -1342,6 +1964,7 @@ function captureIconState() {
       x: iconX.value,
       y: iconY.value,
       bgColor: iconBgColor.value,
+      bgTransparent: iconBgTransparent ? iconBgTransparent.checked : false,
       sharpen: iconSharpen.checked
   };
 }
@@ -1353,7 +1976,8 @@ function applyIconState(state) {
   iconX.value = state.x;
   iconY.value = state.y;
   iconBgColor.value = state.bgColor;
-  if (bgColorIndicator) bgColorIndicator.style.backgroundColor = state.bgColor;
+  if (iconBgTransparent) iconBgTransparent.checked = !!state.bgTransparent;
+  updateBgColorUI(state.bgColor, !!state.bgTransparent);
   iconSharpen.checked = state.sharpen;
   isApplyingHistoryState = false;
   
@@ -1383,7 +2007,9 @@ function updateLabelValues() {
 }
 
 function unlockControls() {
-  [iconEnvSelect, iconBgColor, iconScale, iconX, iconY, iconSharpen, uploadIconsBtn].forEach(el => el.disabled = false);
+  [iconEnvSelect, iconBgColor, iconBgTransparent, btnBgTransparent, iconScale, iconX, iconY, iconSharpen, uploadIconsBtn].forEach(el => {
+      if (el) el.disabled = false;
+  });
   
   previewPlaceholder.classList.add('opacity-0');
   setTimeout(() => {
@@ -1414,7 +2040,8 @@ iconFileInput.addEventListener('change', (e) => {
           // Default configuration
           iconEnvSelect.value = "prod";
           iconBgColor.value = "#FFFFFF";
-          if (bgColorIndicator) bgColorIndicator.style.backgroundColor = "#FFFFFF";
+          if (iconBgTransparent) iconBgTransparent.checked = false;
+          updateBgColorUI("#FFFFFF", false);
           iconX.value = 0;
           iconY.value = 0;
           iconScale.value = (iconImg.width > iconImg.height) ? (512 / iconImg.height) : (512 / iconImg.width);
@@ -1440,13 +2067,45 @@ iconFileInput.addEventListener('change', (e) => {
   el.addEventListener('change', () => { if(iconImgLoaded) saveHistoryStep(); });
 });
 
+iconBgColor.addEventListener('click', () => {
+  if (iconImgLoaded && iconBgTransparent && iconBgTransparent.checked) {
+      iconBgTransparent.checked = false;
+      updateBgColorUI(iconBgColor.value, false);
+      renderIconCanvases();
+      saveHistoryStep();
+  }
+});
+
 iconBgColor.addEventListener('input', (e) => {
-  if (bgColorIndicator) bgColorIndicator.style.backgroundColor = e.target.value;
+  if (iconBgTransparent && iconBgTransparent.checked) {
+      iconBgTransparent.checked = false;
+  }
+  updateBgColorUI(e.target.value, false);
+  if (iconImgLoaded) renderIconCanvases();
 });
 
 [iconBgColor, iconSharpen, iconEnvSelect].forEach(el => {
   el.addEventListener('change', () => { if(iconImgLoaded) { renderIconCanvases(); saveHistoryStep(); } });
 });
+
+if (iconBgTransparent) {
+  iconBgTransparent.addEventListener('change', () => {
+      if (!iconImgLoaded) return;
+      updateBgColorUI(iconBgColor.value, iconBgTransparent.checked);
+      renderIconCanvases();
+      saveHistoryStep();
+  });
+}
+
+if (btnBgTransparent) {
+  btnBgTransparent.addEventListener('click', () => {
+      if (!iconImgLoaded || !iconBgTransparent) return;
+      iconBgTransparent.checked = !iconBgTransparent.checked;
+      updateBgColorUI(iconBgColor.value, iconBgTransparent.checked);
+      renderIconCanvases();
+      saveHistoryStep();
+  });
+}
 
 undoBtn.addEventListener('click', () => {
   if (undoStack.length > 1) {
@@ -1479,20 +2138,29 @@ function sharpenFilter(ctx, w, h) {
   const outputData = output.data;
   const k = [  0, -0.5,  0, -0.5,   3, -0.5, 0, -0.5,  0 ];
 
+  // Copy all pixels first so borders and transparent pixels remain intact
+  outputData.set(data);
+
   for (let y = 1; y < h - 1; y++) {
       for (let x = 1; x < w - 1; x++) {
+          const centerIdx = (y * w + x) * 4;
+          const alpha = data[centerIdx + 3];
+          if (alpha === 0) continue;
+
           for (let c = 0; c < 3; c++) {
               let sum = 0;
               for (let ky = -1; ky <= 1; ky++) {
                   for (let kx = -1; kx <= 1; kx++) {
-                      const idx = ((y + ky) * w + (x + kx)) * 4 + c;
+                      const neighborIdx = ((y + ky) * w + (x + kx)) * 4;
+                      // Avoid bleeding RGB from completely transparent neighbor pixels
+                      const sampleVal = data[neighborIdx + 3] === 0 ? data[centerIdx + c] : data[neighborIdx + c];
                       const kidx = (ky + 1) * 3 + (kx + 1);
-                      sum += data[idx] * k[kidx];
+                      sum += sampleVal * k[kidx];
                   }
               }
-              outputData[(y * w + x) * 4 + c] = Math.min(255, Math.max(0, sum));
+              outputData[centerIdx + c] = Math.min(255, Math.max(0, sum));
           }
-          outputData[(y * w + x) * 4 + 3] = data[(y * w + x) * 4 + 3];
+          outputData[centerIdx + 3] = alpha;
       }
   }
   ctx.putImageData(output, 0, 0);
@@ -1502,9 +2170,11 @@ function drawIconToCanvas(canvas, size, state) {
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, size, size);
   
-  // Background Fill
-  ctx.fillStyle = state.bgColor;
-  ctx.fillRect(0, 0, size, size);
+  // Background Fill (skip when transparent background is enabled)
+  if (!state.bgTransparent) {
+      ctx.fillStyle = state.bgColor;
+      ctx.fillRect(0, 0, size, size);
+  }
   
   // Draw Base Image
   const scaleModifier = size / 512; 
@@ -1609,7 +2279,9 @@ uploadIconsBtn.addEventListener('click', async () => {
       btnSpinner.classList.add('hidden');
       
       // Disable controls again
-      [iconEnvSelect, iconBgColor, iconScale, iconX, iconY, iconSharpen, uploadIconsBtn].forEach(el => el.disabled = true);
+      [iconEnvSelect, iconBgColor, iconBgTransparent, btnBgTransparent, iconScale, iconX, iconY, iconSharpen, uploadIconsBtn].forEach(el => {
+          if (el) el.disabled = true;
+      });
       
       workspaceContainer.classList.add('opacity-0');
       setTimeout(() => {

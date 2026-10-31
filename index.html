@@ -20,6 +20,27 @@ select optgroup { background-color: #000; color: #9ca3af; font-weight: bold; fon
 ::-webkit-scrollbar-track { background: #000; }
 ::-webkit-scrollbar-thumb { background: #2e2e2e; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #4a4a4a; }
+/* Transparency checkerboard patterns for App Icon Studio */
+.bg-checkerboard {
+  background-color: #18181b;
+  background-image:
+    linear-gradient(45deg, #27272a 25%, transparent 25%),
+    linear-gradient(-45deg, #27272a 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #27272a 75%),
+    linear-gradient(-45deg, transparent 75%, #27272a 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+}
+.bg-checkerboard-sm {
+  background-color: #18181b;
+  background-image:
+    linear-gradient(45deg, #3f3f46 25%, transparent 25%),
+    linear-gradient(-45deg, #3f3f46 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #3f3f46 75%),
+    linear-gradient(-45deg, transparent 75%, #3f3f46 75%);
+  background-size: 8px 8px;
+  background-position: 0 0, 0 4px, 4px -4px, -4px 0px;
+}
 </style>
 <script>
 if ('serviceWorker' in navigator) {
@@ -186,7 +207,36 @@ navigator.serviceWorker.register('sw.js').catch(err => console.log('SW setup ski
 </select>
 <div id="promote-target-pages-link" class="hidden transition-all duration-200"></div>
 </div>
-<div class="space-y-1.5 md:col-span-2">
+<div class="md:col-span-2 pt-1 flex flex-col gap-3">
+<div class="flex flex-wrap items-center justify-between gap-3 bg-darkinput/60 border border-darkborder rounded-xl px-4 py-3">
+<label class="flex items-center gap-2.5 cursor-pointer select-none">
+<input type="checkbox" id="promote-specific-only" class="w-4 h-4 rounded accent-purple-600 bg-darkinput border-darkborder cursor-pointer">
+<span class="text-sm font-semibold text-gray-200 hover:text-white transition">Only promote specific file(s)</span>
+</label>
+<button type="button" id="btn-browse-source-repo" class="px-3.5 py-1.5 bg-purple-950/60 hover:bg-purple-900/80 border border-purple-500/40 text-purple-300 hover:text-white rounded-lg text-xs font-semibold transition flex items-center gap-2 cursor-pointer shadow-sm" title="Browse Source Repository Directory">
+<svg class="w-4 h-4 text-purple-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
+<span>Browse Source Repo...</span>
+</button>
+</div>
+<div id="promote-specific-container" class="hidden space-y-2 bg-purple-950/10 border border-purple-500/20 rounded-xl p-4 transition-all">
+<div class="flex justify-between items-center gap-2">
+<label for="promote-specific-files" class="font-semibold text-xs text-purple-300 flex items-center gap-2">
+<span>Specific Files to Promote</span>
+<span id="promote-specific-count" class="px-2 py-0.5 rounded-md bg-purple-900/60 border border-purple-500/30 text-[10px] font-bold text-purple-200">0 selected</span>
+</label>
+<button type="button" id="btn-clear-specific-files" class="text-[11px] text-gray-400 hover:text-rose-400 font-semibold transition cursor-pointer">Clear All</button>
+</div>
+<div class="relative flex">
+<input type="text" id="promote-specific-files" class="w-full border-2 border-darkborder rounded-xl py-2.5 pl-4 pr-14 bg-darkinput text-white outline-none focus:border-purple-500 transition text-sm shadow-inner font-mono text-xs" placeholder="Select files using browser or enter comma-separated paths (e.g. index.html, updater.js)">
+<button type="button" id="btn-browse-source-inline" class="absolute right-1.5 top-1.5 bottom-1.5 bg-white/5 hover:bg-white/10 text-gray-300 px-3 rounded-lg border border-transparent hover:border-darkborder transition flex items-center justify-center group" title="Browse Source Repository">
+<svg class="w-5 h-5 group-hover:text-purple-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
+</button>
+</div>
+<div id="promote-selected-chips" class="flex flex-wrap gap-1.5 pt-1 empty:hidden"></div>
+<p class="text-[10px] text-gray-400">Only the selected file(s) above will be promoted to the Target Repository. All other target repository files remain untouched.</p>
+</div>
+</div>
+<div id="promote-exclude-container" class="space-y-1.5 md:col-span-2">
 <label class="font-semibold text-xs text-gray-400">Excluded Files (Comma-separated, exactly matches path)</label>
 <input type="text" id="promote-exclude" value="backend/config.js" class="w-full border-2 border-darkborder rounded-xl py-2.5 px-4 bg-darkinput text-white outline-none focus:border-purple-500 transition text-sm shadow-inner">
 <p class="text-[10px] text-gray-500 mt-1">Note: All workflow files inside <code class="text-gray-400 font-mono">.github/</code> are automatically excluded.</p>
@@ -230,9 +280,15 @@ navigator.serviceWorker.register('sw.js').catch(err => console.log('SW setup ski
                     <option value="exp">Experimentation</option>
                 </select>
             </div>
-            <div class="flex items-center justify-start md:justify-end gap-2 pt-2 md:pt-5">
-                <input type="checkbox" id="icon-sharpen" disabled class="w-4 h-4 rounded accent-pink-600 bg-darkinput border-darkborder cursor-pointer disabled:opacity-50">
-                <label for="icon-sharpen" class="text-xs font-semibold text-gray-400 cursor-pointer select-none transition hover:text-white">Sharpen Filter</label>
+            <div class="flex flex-wrap items-center justify-start md:justify-end gap-4 pt-2 md:pt-5">
+                <div class="flex items-center gap-2">
+                    <input type="checkbox" id="icon-bg-transparent" disabled class="w-4 h-4 rounded accent-pink-600 bg-darkinput border-darkborder cursor-pointer disabled:opacity-50">
+                    <label for="icon-bg-transparent" class="text-xs font-semibold text-gray-400 cursor-pointer select-none transition hover:text-white">Transparent BG</label>
+                </div>
+                <div class="flex items-center gap-2">
+                    <input type="checkbox" id="icon-sharpen" disabled class="w-4 h-4 rounded accent-pink-600 bg-darkinput border-darkborder cursor-pointer disabled:opacity-50">
+                    <label for="icon-sharpen" class="text-xs font-semibold text-gray-400 cursor-pointer select-none transition hover:text-white">Sharpen Filter</label>
+                </div>
             </div>
         </div>
 
@@ -254,12 +310,17 @@ navigator.serviceWorker.register('sw.js').catch(err => console.log('SW setup ski
                         <!-- 512 Canvas & Bg Color & X Slider -->
                         <div class="flex flex-col gap-4">
                             <div class="relative group">
-                                <!-- Floating Base Color Picker -->
-                                <div class="absolute -top-4 -left-4 z-20 flex items-center justify-center group" title="Background Color">
-                                    <div class="w-10 h-10 bg-darksurface border-2 border-darkborder rounded-full shadow-lg flex items-center justify-center group-hover:border-pink-500 transition-colors relative overflow-hidden">
+                                <!-- Floating Base Color Picker & Transparent Toggle -->
+                                <div class="absolute -top-4 -left-4 z-20 flex items-center gap-1.5">
+                                    <div id="bg-color-picker-wrapper" class="w-10 h-10 bg-darksurface border-2 border-pink-500 rounded-full shadow-lg flex items-center justify-center hover:border-pink-400 transition-all relative overflow-hidden" title="Solid Background Color">
                                         <div id="bg-color-indicator" class="w-6 h-6 rounded-full border border-darkborder" style="background-color: #FFFFFF;"></div>
                                         <input type="color" id="icon-bg-color" value="#FFFFFF" disabled class="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed">
                                     </div>
+                                    <button type="button" id="btn-bg-transparent" disabled class="w-10 h-10 bg-darksurface border-2 border-darkborder rounded-full shadow-lg flex items-center justify-center hover:border-pink-500 transition-all relative overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed" title="Toggle Transparent Background" aria-pressed="false">
+                                        <div class="w-6 h-6 rounded-full border border-darkborder bg-checkerboard-sm relative flex items-center justify-center overflow-hidden">
+                                            <div class="w-full h-0.5 bg-rose-500 rotate-45 transform"></div>
+                                        </div>
+                                    </button>
                                 </div>
                                 <canvas id="preview-512-canvas" class="w-64 h-64 sm:w-80 sm:h-80 rounded-[22.5%] bg-black/50 shadow-2xl border border-darkborder transition-transform" width="512" height="512"></canvas>
                             </div>
@@ -327,6 +388,56 @@ Select Drive Folder
 <div class="flex gap-2">
 <button id="btn-cancel-folder" type="button" class="px-4 py-2 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-white/5 transition">Cancel</button>
 <button id="btn-confirm-folder" type="button" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-xl text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed" disabled>Select</button>
+</div>
+</div>
+</div>
+</div>
+
+<!-- SOURCE REPO FILE BROWSER MODAL -->
+<div id="repo-browser-modal" class="hidden fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm transition-opacity duration-200 opacity-0">
+<div class="bg-darksurface border border-darkborder rounded-2xl shadow-2xl w-full max-w-xl flex flex-col h-[75vh] max-h-[650px] transform transition-all duration-200 scale-95 opacity-0" id="repo-browser-content">
+<div class="px-5 py-4 border-b border-darkborder flex justify-between items-center bg-white/5 rounded-t-2xl">
+<div class="flex items-center gap-2.5 overflow-hidden">
+<svg class="w-5 h-5 text-purple-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
+<div class="truncate">
+<h3 class="font-bold text-gray-200 text-sm md:text-base truncate">Select Source Files to Promote</h3>
+<p id="repo-browser-subtitle" class="text-[11px] text-gray-400 truncate"></p>
+</div>
+</div>
+<button id="btn-close-repo-modal" type="button" class="text-gray-400 hover:text-white transition rounded-lg p-1 hover:bg-white/10 shrink-0">
+<svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+</button>
+</div>
+<div class="p-3 bg-darkinput border-b border-darkborder flex flex-col gap-2.5">
+<div class="flex items-center gap-2">
+<button id="btn-repo-up" type="button" class="disabled:opacity-30 disabled:cursor-not-allowed p-1.5 rounded-lg bg-black/30 hover:bg-black/50 text-gray-300 border border-white/5 transition shrink-0" title="Go Up Directory" disabled>
+<svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+</button>
+<div id="repo-breadcrumbs" class="flex items-center gap-1 text-xs font-mono text-gray-300 overflow-x-auto whitespace-nowrap py-1 flex-grow"></div>
+<button id="btn-repo-select-dir" type="button" class="px-2.5 py-1 rounded-lg bg-purple-950/60 hover:bg-purple-900/80 border border-purple-500/30 text-[11px] font-semibold text-purple-300 hover:text-white transition shrink-0">Select Folder</button>
+</div>
+<div class="relative flex items-center">
+<svg class="w-4 h-4 text-gray-500 absolute left-3 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+<input type="text" id="repo-file-search" class="w-full bg-black/30 border border-darkborder focus:border-purple-500 rounded-lg py-1.5 pl-9 pr-8 text-xs text-gray-200 outline-none transition" placeholder="Filter files by name or path...">
+<button type="button" id="btn-clear-repo-search" class="hidden absolute right-2.5 text-gray-500 hover:text-gray-300">
+<svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+</button>
+</div>
+</div>
+<div class="flex-grow overflow-y-auto custom-scrollbar relative bg-black/20">
+<div id="repo-browser-loading" class="absolute inset-0 flex justify-center items-center bg-darksurface/50 backdrop-blur-sm z-10 hidden">
+<div class="spinner !w-8 !h-8 border-[3px] border-purple-500/30 !border-l-purple-500"></div>
+</div>
+<div id="repo-browser-list" class="p-2 flex flex-col gap-1"></div>
+</div>
+<div class="p-4 border-t border-darkborder bg-white/5 rounded-b-2xl flex flex-wrap justify-between items-center gap-3">
+<div class="flex items-center gap-3">
+<span class="text-xs font-semibold text-gray-300" id="repo-selected-info">0 files selected</span>
+<button id="btn-repo-clear-selection" type="button" class="text-xs text-rose-400 hover:text-rose-300 font-semibold transition hidden">Clear</button>
+</div>
+<div class="flex gap-2 ml-auto">
+<button id="btn-cancel-repo-modal" type="button" class="px-4 py-2 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-white/5 transition">Cancel</button>
+<button id="btn-confirm-repo-modal" type="button" class="bg-purple-600 hover:bg-purple-500 text-white px-5 py-2 rounded-xl text-sm font-semibold transition shadow-lg">Apply Selection</button>
 </div>
 </div>
 </div>
