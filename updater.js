@@ -63,6 +63,11 @@ tokenInput.value = localStorage.getItem('acm_gh_token') || '';
 branchInput.value = localStorage.getItem('acm_gh_branch') || 'main';
 skipBackupCheckbox.checked = localStorage.getItem('acm_skip_backup') === 'true';
 
+const promoteSkipBackupEl = document.getElementById('promote-skip-backup');
+if (promoteSkipBackupEl) {
+ promoteSkipBackupEl.checked = localStorage.getItem('acm_promote_skip_backup') === 'true';
+}
+
 const savedFolderId = localStorage.getItem('acm_drive_folder_id') || localStorage.getItem('acm_drive_folder');
 
 if (savedFolderId) {
@@ -72,6 +77,7 @@ if (savedFolderId) {
 }
 
 toggleBtnText();
+if (typeof updatePromoteModeUI === 'function') updatePromoteModeUI();
 if (tokenInput.value.trim()) fetchRepos();
 });
 
@@ -546,6 +552,71 @@ try {
 }
 }
 
+const IMAGE_FILE_REGEX = /\.(png|jpe?g|gif|svg|ico|webp|bmp|tiff?|avif|heic|heif|jfif|cur|psd|ai|eps|raw|cr2|nef|dng|xcf|sketch|fig)$/i;
+const BINARY_ASSET_REGEX = /\.(pdf|zip|tar|gz|7z|rar|mp3|mp4|mov|avi|mkv|webm|ttf|woff|woff2|eot|otf|bin|exe|dll|wav|ogg|flac|aac|lockb)$/i;
+const CODE_SCRIPT_FILE_REGEX = /\.(html?|css|s[ac]ss|less|styl|m?[jt]sx?|c[jt]s|gs|pyw?|rb|php|phtml|java|kts?|scala|go|rs|c|h|cpp|hpp|cc|cs|swift|dart|lua|pl|r|sh|bash|zsh|fish|ps1|bat|cmd|sql|graphql|gql|prisma|proto|vue|svelte|astro|jsonc?|ya?ml|toml|xml|ini|cfg|conf|md|mdx|ejs|hbs|pug|twig|liquid|webmanifest)$/i;
+const KNOWN_CODE_BASENAMES = new Set([
+ 'dockerfile', 'makefile', 'procfile', '.gitignore', '.gitattributes',
+ '.npmrc', '.nvmrc', '.editorconfig', '.eslintrc', '.prettierrc',
+ '.babelrc', '.browserslistrc', '.env.example', '.clasp.json'
+]);
+
+function isImageFilePath(filePath) {
+ return IMAGE_FILE_REGEX.test(String(filePath || ''));
+}
+
+function isCodeOrScriptFile(filePath) {
+ const pathStr = String(filePath || '');
+ if (isImageFilePath(pathStr) || BINARY_ASSET_REGEX.test(pathStr)) return false;
+ if (CODE_SCRIPT_FILE_REGEX.test(pathStr)) return true;
+ const baseName = pathStr.split('/').pop().toLowerCase();
+ return KNOWN_CODE_BASENAMES.has(baseName);
+}
+
+async function fetchRepoTree(repo, branch, token) {
+ const headers = { "Authorization": `Bearer ${token}` };
+ const treeRes = await fetch(`https://api.github.com/repos/${repo}/git/trees/${branch}?recursive=1`, { headers });
+ if (!treeRes.ok) throw await extractGitHubError(treeRes, `GitHub API Error: Could not fetch tree for branch '${branch}'`);
+ const treeData = await treeRes.json();
+ return treeData.tree || [];
+}
+
+function computeTargetFilesToDelete(targetTree, sourceFiles, excludedList) {
+ const sourcePathSet = new Set((sourceFiles || []).map(f => f.path));
+ const excludedSet = new Set((excludedList || []).map(p => normalizeRepoFilePath(p).toLowerCase()).filter(Boolean));
+ const protectedLockfiles = new Set(['bun.lock', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml']);
+
+ const filesToDelete = [];
+ let protectedImageCount = 0;
+
+ (targetTree || []).forEach(item => {
+     if (item.type !== 'blob') return;
+     const pathStr = item.path;
+     const lowerPath = pathStr.toLowerCase();
+
+     // Strictly protect all image files (which also preserves every folder containing images in Git)
+     if (isImageFilePath(pathStr)) {
+         protectedImageCount++;
+         return;
+     }
+
+     // Never delete workflows, protected directories, lockfiles, excluded files, or non-code binaries
+     if (lowerPath.startsWith('.github/')) return;
+     if (lowerPath.startsWith('updater/') || lowerPath.startsWith('node_modules/')) return;
+     if (protectedLockfiles.has(lowerPath)) return;
+     if (excludedSet.has(lowerPath)) return;
+     if (BINARY_ASSET_REGEX.test(pathStr)) return;
+
+     // Only delete code / script files that are not being populated by the source repo
+     if (!isCodeOrScriptFile(pathStr)) return;
+     if (sourcePathSet.has(pathStr)) return;
+
+     filesToDelete.push({ path: pathStr, mode: item.mode || "100644" });
+ });
+
+ return { filesToDelete, protectedImageCount };
+}
+
 async function fetchAllRepoFiles(repo, branch, token) {
 const headers = { "Authorization": `Bearer ${token}` };
 const treeRes = await fetch(`https://api.github.com/repos/${repo}/git/trees/${branch}?recursive=1`, { headers });
@@ -559,8 +630,7 @@ const fileNodes = treeData.tree.filter(item => {
  if (item.path.startsWith('updater/') || item.path.startsWith('node_modules/')) return false;
  if (['bun.lock', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'].includes(item.path)) return false;
  
- const imageAndBinaryRegex = /\.(png|jpe?g|gif|svg|ico|webp|pdf|zip|tar|gz|mp3|mp4|mov|avi|ttf|woff|woff2|eot|bin|exe|dll|psd|ai|sketch|wav|ogg|lockb)$/i;
- if (item.path.match(imageAndBinaryRegex)) return false;
+ if (isImageFilePath(item.path) || BINARY_ASSET_REGEX.test(item.path)) return false;
  
  return true;
 });
@@ -583,7 +653,7 @@ for (let i = 0; i < fileNodes.length; i += batchSize) {
 return { fileNodes, compiledFiles };
 }
 
-async function pushCommitToGitHub(repo, branch, token, files, commitMessage) {
+async function pushCommitToGitHub(repo, branch, token, files, commitMessage, filesToDelete = []) {
 const headers = { 
  "Authorization": `Bearer ${token}`, 
  "Accept": "application/vnd.github.v3+json",
@@ -604,6 +674,7 @@ const baseTreeSha = (await res.json()).tree.sha;
 
 // 3. Create standalone blobs sequentially to prevent payload size limits / WAF Blocks
 const treeNodes = [];
+const uploadedPaths = new Set();
 for (let i = 0; i < files.length; i++) {
  const f = files[i];
  setStatus(`Uploading file ${i + 1} of ${files.length} as Blob: ${f.path}...`, 'info');
@@ -622,7 +693,21 @@ for (let i = 0; i < files.length; i++) {
  if (!blobRes.ok) throw await extractGitHubError(blobRes, `GitHub Blob Creation Failed (${f.path})`);
  
  const blobData = await blobRes.json();
+ uploadedPaths.add(f.path);
  treeNodes.push({ path: f.path, mode: "100644", type: "blob", sha: blobData.sha });
+}
+
+// 3b. Append deletions (sha: null) with defense-in-depth guards for workflows and images
+if (Array.isArray(filesToDelete) && filesToDelete.length > 0) {
+ filesToDelete.forEach(del => {
+     const delPath = typeof del === 'string' ? del : del.path;
+     const delMode = (typeof del === 'object' && del.mode) ? del.mode : "100644";
+     if (!delPath) return;
+     if (uploadedPaths.has(delPath)) return;
+     if (delPath.toLowerCase().startsWith('.github/')) return;
+     if (isImageFilePath(delPath)) return;
+     treeNodes.push({ path: delPath, mode: delMode, type: "blob", sha: null });
+ });
 }
 
 // 4. Create new Git Tree using the collected blob SHAs
@@ -1059,20 +1144,26 @@ if (editBackupNameBtn) {
 }
 
 // Iframe-safe confirmation helper (works on both Google AI Studio and GitHub Pages)
-function showConfirmModal(message) {
+function showConfirmModal(message, options = {}) {
+ const {
+   title = "Confirm Rollback",
+   confirmLabel = "Confirm Rollback",
+   confirmClass = "bg-rose-600 hover:bg-rose-500",
+   iconColorClass = "text-rose-400"
+ } = options;
  return new Promise((resolve) => {
    const overlay = document.createElement('div');
    overlay.className = 'fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm';
    overlay.innerHTML = `
      <div class="bg-darksurface border border-darkborder rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
        <div class="px-5 py-4 border-b border-darkborder bg-white/5 flex items-center gap-2.5">
-         <svg class="w-5 h-5 text-rose-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
-         <h3 class="font-bold text-gray-200 text-base">Confirm Rollback</h3>
+         <svg class="w-5 h-5 ${iconColorClass} shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+         <h3 class="font-bold text-gray-200 text-base">${escapeHtmlAttr(title)}</h3>
        </div>
        <div class="p-5 text-sm text-gray-300 leading-relaxed">${message}</div>
        <div class="px-5 py-3.5 border-t border-darkborder bg-white/5 flex justify-end gap-2.5">
          <button type="button" id="confirm-modal-cancel" class="px-4 py-2 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-white/5 transition">Cancel</button>
-         <button type="button" id="confirm-modal-ok" class="bg-rose-600 hover:bg-rose-500 text-white px-5 py-2 rounded-xl text-sm font-semibold transition">Confirm Rollback</button>
+         <button type="button" id="confirm-modal-ok" class="${confirmClass} text-white px-5 py-2 rounded-xl text-sm font-semibold transition">${escapeHtmlAttr(confirmLabel)}</button>
        </div>
      </div>
    `;
@@ -1138,6 +1229,9 @@ const promoteSpecificFilesInput = document.getElementById('promote-specific-file
 const promoteSpecificCount = document.getElementById('promote-specific-count');
 const promoteSelectedChips = document.getElementById('promote-selected-chips');
 const promoteExcludeContainer = document.getElementById('promote-exclude-container');
+const promoteFullCleanContainer = document.getElementById('promote-full-clean-container');
+const promoteFullClean = document.getElementById('promote-full-clean');
+const promoteSkipBackup = document.getElementById('promote-skip-backup');
 const btnBrowseSourceRepo = document.getElementById('btn-browse-source-repo');
 const btnBrowseSourceInline = document.getElementById('btn-browse-source-inline');
 const btnClearSpecificFiles = document.getElementById('btn-clear-specific-files');
@@ -1205,13 +1299,20 @@ function setSelectedPromoteFiles(pathsArray) {
 function updatePromoteButtonLabel() {
     const btnText = document.getElementById('promote-btn-text');
     if (!btnText) return;
-    if (promoteSpecificOnly && promoteSpecificOnly.checked) {
+    const isSpecific = promoteSpecificOnly && promoteSpecificOnly.checked;
+    const isFullClean = !isSpecific && promoteFullClean && promoteFullClean.checked;
+    const skipBackup = promoteSkipBackup && promoteSkipBackup.checked;
+    const suffix = skipBackup ? '(Skip Backup)' : '& Auto-Backup Target';
+
+    if (isSpecific) {
         const count = getSelectedPromoteFiles().length;
         btnText.textContent = count > 0
-            ? `Promote ${count} Selected File${count === 1 ? '' : 's'} & Auto-Backup Target`
-            : 'Promote Specific Files & Auto-Backup Target';
+            ? `Promote ${count} Selected File${count === 1 ? '' : 's'} ${suffix}`
+            : `Promote Specific Files ${suffix}`;
+    } else if (isFullClean) {
+        btnText.textContent = `Full Clean Promote ${suffix}`;
     } else {
-        btnText.textContent = 'Promote Code & Auto-Backup Target';
+        btnText.textContent = `Promote Code ${suffix}`;
     }
 }
 
@@ -1244,15 +1345,28 @@ function updatePromoteModeUI() {
     if (promoteSpecificOnly.checked) {
         promoteSpecificContainer.classList.remove('hidden');
         if (promoteExcludeContainer) promoteExcludeContainer.classList.add('opacity-50');
+        if (promoteFullCleanContainer) promoteFullCleanContainer.classList.add('hidden');
     } else {
         promoteSpecificContainer.classList.add('hidden');
         if (promoteExcludeContainer) promoteExcludeContainer.classList.remove('opacity-50');
+        if (promoteFullCleanContainer) promoteFullCleanContainer.classList.remove('hidden');
     }
     syncPromoteSpecificUI();
 }
 
 if (promoteSpecificOnly) {
     promoteSpecificOnly.addEventListener('change', updatePromoteModeUI);
+}
+
+if (promoteFullClean) {
+    promoteFullClean.addEventListener('change', updatePromoteButtonLabel);
+}
+
+if (promoteSkipBackup) {
+    promoteSkipBackup.addEventListener('change', (e) => {
+        localStorage.setItem('acm_promote_skip_backup', e.target.checked);
+        updatePromoteButtonLabel();
+    });
 }
 
 if (promoteSpecificFilesInput) {
@@ -1716,6 +1830,8 @@ promoteBtn.addEventListener('click', async () => {
     const token = tokenInput.value.trim();
     const branch = branchInput.value.trim();
     const isSpecificMode = promoteSpecificOnly && promoteSpecificOnly.checked;
+    const isFullCleanMode = !isSpecificMode && promoteFullClean && promoteFullClean.checked;
+    const skipTargetBackup = promoteSkipBackup && promoteSkipBackup.checked;
     const specificPaths = isSpecificMode ? getSelectedPromoteFiles() : [];
 
     const folderInputVal = document.getElementById('gh-drive-folder').value.trim();
@@ -1724,47 +1840,76 @@ promoteBtn.addEventListener('click', async () => {
 
     if (!sourceRepo || !targetRepo) return setStatus("Source and Target repositories must be selected.", "error");
     if (sourceRepo === targetRepo) return setStatus("Source and Target repositories cannot be the same.", "error");
-    if (!token || !folderId) return setStatus("Token and Google Drive Folder are required in Step 1.", "error");
+    if (!token || !branch) return setStatus("GitHub Token and Target Branch are required in Step 1.", "error");
+    if (!skipTargetBackup && !folderId) return setStatus("Google Drive Folder is required in Step 1 (or check 'Skip Google Drive backup of Target').", "error");
     if (isSpecificMode && specificPaths.length === 0) {
         return setStatus("Please select at least one file to promote using 'Browse Source Repo...' or enter file paths.", "error");
     }
 
     const targetRepoNameStr = targetRepo.split('/').pop();
     const sourceRepoNameStr = sourceRepo.split('/').pop();
-    const defaultBackupName = getDefaultBackupName(targetRepoNameStr);
-    const customBackupName = await showBackupNameModal({
-        initialName: defaultBackupName,
-        defaultName: defaultBackupName,
-        title: "Set Target Backup Name",
-        subtitle: isSpecificMode
-            ? `Set the backup name for ${targetRepoNameStr} before promoting ${specificPaths.length} selected file(s) from ${sourceRepoNameStr}.`
-            : `Set the backup name for ${targetRepoNameStr} before promoting code from ${sourceRepoNameStr}.`,
-        confirmLabel: "Backup Target & Promote"
-    });
-    if (customBackupName === null) return;
+
+    if (isFullCleanMode) {
+        const backupNote = skipTargetBackup
+            ? '<p class="mt-2.5 text-amber-300 font-semibold">Note: Target Google Drive backup is currently skipped.</p>'
+            : '<p class="mt-2.5 text-emerald-300">A Google Drive backup of the Target repository will be created first.</p>';
+        const confirmed = await showConfirmModal(
+            `<p><strong>Full Promotion</strong> will delete all existing code &amp; script files in <strong>${escapeHtmlAttr(targetRepoNameStr)}</strong> that are not in <strong>${escapeHtmlAttr(sourceRepoNameStr)}</strong> before populating with the Source files.</p>
+             <p class="mt-2 text-xs text-gray-400">Protected and never deleted: all image files, folders containing images, <code class="font-mono text-gray-300">.github/</code> workflows, and your Excluded Files.</p>
+             ${backupNote}`,
+            {
+                title: "Confirm Full Clean Promotion",
+                confirmLabel: skipTargetBackup ? "Full Clean Promote" : "Continue to Backup",
+                confirmClass: "bg-amber-600 hover:bg-amber-500",
+                iconColorClass: "text-amber-400"
+            }
+        );
+        if (!confirmed) return;
+    }
+
+    let customBackupName = null;
+    if (!skipTargetBackup) {
+        const defaultBackupName = getDefaultBackupName(targetRepoNameStr);
+        customBackupName = await showBackupNameModal({
+            initialName: defaultBackupName,
+            defaultName: defaultBackupName,
+            title: "Set Target Backup Name",
+            subtitle: isSpecificMode
+                ? `Set the backup name for ${targetRepoNameStr} before promoting ${specificPaths.length} selected file(s) from ${sourceRepoNameStr}.`
+                : (isFullCleanMode
+                    ? `Set the backup name for ${targetRepoNameStr} before performing a Full Clean Promotion from ${sourceRepoNameStr}.`
+                    : `Set the backup name for ${targetRepoNameStr} before promoting code from ${sourceRepoNameStr}.`),
+            confirmLabel: "Backup Target & Promote"
+        });
+        if (customBackupName === null) return;
+    }
 
     const btnText = document.getElementById('promote-btn-text');
     const btnSpinner = document.getElementById('promote-btn-spinner');
+    const totalSteps = skipTargetBackup ? 2 : 3;
 
     try {
         promoteBtn.disabled = true;
         btnSpinner.classList.remove('hidden');
 
         let filteredSourceFiles = [];
+        const excludedList = document.getElementById('promote-exclude').value
+            .split(',')
+            .map(s => normalizeRepoFilePath(s).toLowerCase())
+            .filter(Boolean);
 
         if (isSpecificMode) {
             // 1. Fetch only the selected specific files from Source
             setStatus(`Fetching ${specificPaths.length} selected file(s) from ${sourceRepo}...`, 'info');
-            btnText.textContent = "Step 1/3: Fetching Selected Files...";
+            btnText.textContent = `Step 1/${totalSteps}: Fetching Selected Files...`;
             filteredSourceFiles = await fetchSpecificRepoFiles(sourceRepo, branch, token, specificPaths);
         } else {
             // 1. Fetch all files from Source
             setStatus(`Fetching source files from ${sourceRepo}...`, 'info');
-            btnText.textContent = "Step 1/3: Fetching Source...";
+            btnText.textContent = `Step 1/${totalSteps}: Fetching Source...`;
             const { compiledFiles: sourceFiles } = await fetchAllRepoFiles(sourceRepo, branch, token);
 
             // 2. Filter out .github/ and user exclusions
-            const excludedList = document.getElementById('promote-exclude').value.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
             filteredSourceFiles = sourceFiles.filter(f => {
                 const lowerPath = f.path.toLowerCase();
                 if (lowerPath.startsWith('.github/')) return false;
@@ -1775,39 +1920,67 @@ promoteBtn.addEventListener('click', async () => {
 
         if (filteredSourceFiles.length === 0) throw new Error("No files left to promote after applying filters.");
 
-        // 3. Backup Target for safety
-        setStatus(`Fetching target files to backup ${targetRepo}...`, 'info');
-        btnText.textContent = "Step 2/3: Backing up Target...";
-        const { fileNodes: targetNodes, compiledFiles: targetFiles } = await fetchAllRepoFiles(targetRepo, branch, token);
-        const hierarchy = targetNodes.map(f => f.path).join('\n');
+        // Optional Step: Backup Target for safety
+        let backupUrl = null;
+        let backupId = null;
+        let createdName = null;
 
-        setStatus(`Transmitting ${targetRepo} backup to Google Drive...`, 'info');
-        const backupData = await gasCall(GAS_WEB_APP_URL, {
-            action: 'backupCode',
-            folderId,
-            hierarchy,
-            files: targetFiles,
-            repoName: targetRepoNameStr,
-            backupName: customBackupName
-        });
-        const createdName = backupData.name || customBackupName;
+        if (!skipTargetBackup) {
+            setStatus(`Fetching target files to backup ${targetRepo}...`, 'info');
+            btnText.textContent = `Step 2/${totalSteps}: Backing up Target...`;
+            const { fileNodes: targetNodes, compiledFiles: targetFiles } = await fetchAllRepoFiles(targetRepo, branch, token);
+            const hierarchy = targetNodes.map(f => f.path).join('\n');
 
-        // 4. Push directly to Target
-        setStatus(`Target backup successful! Pushing ${filteredSourceFiles.length} file(s) to ${targetRepo}...`, 'info');
-        btnText.textContent = "Step 3/3: Pushing Update...";
+            setStatus(`Transmitting ${targetRepo} backup to Google Drive...`, 'info');
+            const backupData = await gasCall(GAS_WEB_APP_URL, {
+                action: 'backupCode',
+                folderId,
+                hierarchy,
+                files: targetFiles,
+                repoName: targetRepoNameStr,
+                backupName: customBackupName
+            });
+            backupUrl = backupData.url || null;
+            backupId = backupData.id || null;
+            createdName = backupData.name || customBackupName;
+        }
+
+        // Compute target code/script files to delete if Full Clean Promotion is enabled
+        let filesToDelete = [];
+        let protectedImageCount = 0;
+        if (isFullCleanMode) {
+            setStatus(`Scanning ${targetRepo} to identify obsolete code/script files (preserving images & image folders)...`, 'info');
+            const targetTree = await fetchRepoTree(targetRepo, branch, token);
+            const plan = computeTargetFilesToDelete(targetTree, filteredSourceFiles, excludedList);
+            filesToDelete = plan.filesToDelete;
+            protectedImageCount = plan.protectedImageCount;
+        }
+
+        // Final Step: Push directly to Target
+        const backupPrefix = skipTargetBackup ? 'Skipping target backup. ' : 'Target backup successful! ';
+        const cleanSummary = isFullCleanMode
+            ? ` Removing ${filesToDelete.length} obsolete code/script file(s) (preserving ${protectedImageCount} image file(s)) and pushing ${filteredSourceFiles.length} file(s) to ${targetRepo}...`
+            : `Pushing ${filteredSourceFiles.length} file(s) to ${targetRepo}...`;
+        setStatus(`${backupPrefix}${cleanSummary}`, 'info');
+        btnText.textContent = `Step ${totalSteps}/${totalSteps}: ${isFullCleanMode ? 'Cleaning & Pushing...' : 'Pushing Update...'}`;
+
         const commitMsg = isSpecificMode
             ? `Environment Promotion (${filteredSourceFiles.length} specific file${filteredSourceFiles.length === 1 ? '' : 's'}) from ${sourceRepoNameStr}`
-            : `Environment Promotion from ${sourceRepoNameStr}`;
+            : (isFullCleanMode
+                ? `Full Clean Environment Promotion from ${sourceRepoNameStr}${filesToDelete.length > 0 ? ` (removed ${filesToDelete.length} obsolete code file${filesToDelete.length === 1 ? '' : 's'})` : ''}`
+                : `Environment Promotion from ${sourceRepoNameStr}`);
+
         const newCommitSha = await pushCommitToGitHub(
             targetRepo,
             branch,
             token,
             filteredSourceFiles,
-            commitMsg
+            commitMsg,
+            filesToDelete
         );
 
-        // 5. Monitor
-        pollWorkflowStatus(targetRepo, token, newCommitSha, backupData.url, backupData.id, createdName);
+        // Monitor workflow status
+        pollWorkflowStatus(targetRepo, token, newCommitSha, backupUrl, backupId, createdName);
 
     } catch (err) {
         setStatus(err.message, "error");

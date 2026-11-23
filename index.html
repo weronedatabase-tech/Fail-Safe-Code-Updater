@@ -241,6 +241,17 @@ navigator.serviceWorker.register('sw.js').catch(err => console.log('SW setup ski
 <input type="text" id="promote-exclude" value="backend/config.js" class="w-full border-2 border-darkborder rounded-xl py-2.5 px-4 bg-darkinput text-white outline-none focus:border-purple-500 transition text-sm shadow-inner">
 <p class="text-[10px] text-gray-500 mt-1">Note: All workflow files inside <code class="text-gray-400 font-mono">.github/</code> are automatically excluded.</p>
 </div>
+<div id="promote-full-clean-container" class="md:col-span-2 bg-amber-950/15 border border-amber-500/25 rounded-xl px-4 py-3 space-y-1.5 transition-all">
+<label class="flex items-center gap-2.5 cursor-pointer select-none">
+<input type="checkbox" id="promote-full-clean" class="w-4 h-4 rounded accent-amber-500 bg-darkinput border-darkborder cursor-pointer">
+<span class="text-sm font-semibold text-amber-200 hover:text-amber-100 transition">Full Promotion (Delete target code/script files before populating)</span>
+</label>
+<p class="text-[11px] text-gray-400 pl-6 leading-relaxed">Removes all existing code &amp; script files in the Target Repository before populating with Source files. Images, folders containing images, <code class="text-gray-300 font-mono">.github/</code> workflows, and excluded files are strictly preserved.</p>
+</div>
+</div>
+<div class="px-5 pb-3 flex items-center gap-2">
+<input type="checkbox" id="promote-skip-backup" class="w-4 h-4 rounded accent-purple-600 bg-darkinput border-darkborder cursor-pointer">
+<label for="promote-skip-backup" class="text-sm text-gray-300 cursor-pointer select-none transition hover:text-white">Skip Google Drive backup of Target before promoting</label>
 </div>
 <div class="p-5 pt-0">
 <button type="button" id="promote-btn" class="w-full bg-purple-600 hover:bg-purple-500 text-white font-bold py-3 px-4 rounded-xl shadow-lg transition-all active:scale-[0.98] flex justify-center items-center gap-3">
