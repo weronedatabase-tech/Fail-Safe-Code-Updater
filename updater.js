@@ -197,6 +197,20 @@ return `
 </span>`;
 }
 
+function generateBackupLinksHtml(backupData, label = "View on Google Drive &nearr;") {
+ if (!backupData) return '';
+ const parts = Array.isArray(backupData.parts) && backupData.parts.length > 0
+  ? backupData.parts
+  : (backupData.url ? [{ url: backupData.url, id: backupData.id || null, name: backupData.name || '' }] : []);
+ if (parts.length === 0) return '';
+ if (parts.length === 1) {
+  return generateBackupLinkHtml(parts[0].url, label, parts[0].id, parts[0].name);
+ }
+ return parts.map((p, idx) =>
+  generateBackupLinkHtml(p.url, `Part ${idx + 1}/${parts.length} &nearr;`, p.id, p.name)
+ ).join(' ');
+}
+
 function extractFolderId(input) {
 let folderId = input.trim();
 if (folderId.includes('drive.google.com')) {
@@ -300,16 +314,155 @@ if (!folderId) {
 return { repo, branch, token, gasUrl: GAS_WEB_APP_URL, folderId, skipBackup: skipBackupCheckbox.checked };
 }
 
-async function gasCall(gasUrl, payload) {
-const res = await fetch(gasUrl, {
- method: 'POST',
- mode: 'cors',
- headers: { 'Content-Type': 'text/plain;charset=utf-8' },
- body: JSON.stringify(payload)
-});
-const data = await res.json();
-if (data.error) throw new Error("GAS Error: " + data.error);
-return data;
+let preferGasProxy = false;
+let gasProxyChecked = false;
+let gasProxyAvailable = false;
+
+function canAttemptGasProxy() {
+ try {
+  const host = window.location.hostname || '';
+  if (host.endsWith('.github.io') || window.location.protocol === 'file:') return false;
+  if (gasProxyChecked && !gasProxyAvailable) return false;
+  return true;
+ } catch (e) {
+  return false;
+ }
+}
+
+function isNetworkFetchError(err) {
+ if (!err) return false;
+ if (err.name === 'AbortError') return true;
+ const msg = String(err.message || '').toLowerCase();
+ return err.name === 'TypeError' ||
+  msg.includes('failed to fetch') ||
+  msg.includes('networkerror') ||
+  msg.includes('load failed') ||
+  msg.includes('network request failed');
+}
+
+async function fetchGasDirect(gasUrl, payload, timeoutMs) {
+ const controller = new AbortController();
+ const timer = setTimeout(() => controller.abort(), timeoutMs);
+ try {
+  const res = await fetch(gasUrl, {
+   method: 'POST',
+   mode: 'cors',
+   credentials: 'omit',
+   redirect: 'follow',
+   headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+   body: JSON.stringify(payload),
+   signal: controller.signal
+  });
+  const text = await res.text();
+  let data;
+  try {
+   data = JSON.parse(text);
+  } catch (parseErr) {
+   throw new Error(`Google Apps Script returned an unexpected non-JSON response (HTTP ${res.status}).`);
+  }
+  if (data && data.error) throw new Error("GAS Error: " + data.error);
+  return data;
+ } finally {
+  clearTimeout(timer);
+ }
+}
+
+async function fetchGasViaProxy(gasUrl, payload, timeoutMs) {
+ const controller = new AbortController();
+ const timer = setTimeout(() => controller.abort(), timeoutMs);
+ try {
+  const res = await fetch('/api/gas-proxy', {
+   method: 'POST',
+   headers: { 'Content-Type': 'application/json' },
+   body: JSON.stringify({ gasUrl, payload }),
+   signal: controller.signal
+  });
+  if (res.status === 404 || res.status === 405) {
+   gasProxyChecked = true;
+   gasProxyAvailable = false;
+   return null;
+  }
+  const text = await res.text();
+  let data;
+  try {
+   data = JSON.parse(text);
+  } catch (_) {
+   gasProxyChecked = true;
+   gasProxyAvailable = false;
+   return null;
+  }
+  gasProxyChecked = true;
+  gasProxyAvailable = true;
+  if (data && data.error) {
+   const prefix = String(data.error).startsWith('GAS Error:') ? '' : 'GAS Error: ';
+   throw new Error(prefix + data.error);
+  }
+  if (!res.ok) {
+   throw new Error(`GAS Proxy Error (HTTP ${res.status})`);
+  }
+  return data;
+ } finally {
+  clearTimeout(timer);
+ }
+}
+
+async function gasCall(gasUrl, payload, options = {}) {
+ const {
+  timeoutMs = 110000,
+  retries = 2,
+  retryDelayMs = 1500,
+  allowRetry = true
+ } = options;
+
+ const maxAttempts = allowRetry ? Math.max(1, retries + 1) : 1;
+ let lastErr = null;
+
+ for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  try {
+   if (preferGasProxy && canAttemptGasProxy()) {
+    const proxied = await fetchGasViaProxy(gasUrl, payload, timeoutMs);
+    if (proxied !== null) return proxied;
+    preferGasProxy = false;
+   }
+   return await fetchGasDirect(gasUrl, payload, timeoutMs);
+  } catch (err) {
+   lastErr = err;
+   // Do not retry deterministic GAS application errors (e.g. Invalid action, missing folder)
+   if (err && String(err.message || '').startsWith('GAS Error:')) {
+    throw err;
+   }
+
+   // If direct browser fetch hit a CORS/network failure, try local server proxy if available
+   if (isNetworkFetchError(err) && !preferGasProxy && canAttemptGasProxy()) {
+    try {
+     const proxied = await fetchGasViaProxy(gasUrl, payload, timeoutMs);
+     if (proxied !== null) {
+      preferGasProxy = true;
+      return proxied;
+     }
+    } catch (proxyErr) {
+     lastErr = proxyErr;
+     if (String(proxyErr.message || '').startsWith('GAS Error:')) {
+      throw proxyErr;
+     }
+    }
+   }
+
+   if (attempt < maxAttempts && isNetworkFetchError(lastErr)) {
+    await new Promise(r => setTimeout(r, retryDelayMs * attempt));
+    continue;
+   }
+   break;
+  }
+ }
+
+ if (lastErr && lastErr.name === 'AbortError') {
+  throw new Error("Backup request timed out waiting for Google Apps Script. Please retry or check your repository size.");
+ }
+ if (isNetworkFetchError(lastErr)) {
+  throw new Error("Failed to reach Google Apps Script (network/CORS timeout or payload limit exceeded). Please retry or ensure the latest backend/Code.js is deployed.");
+ }
+ throw lastErr || new Error("Google Apps Script request failed.");
 }
 
 // --- FOLDER BROWSER MODAL LOGIC ---
@@ -553,16 +706,40 @@ try {
 }
 
 const IMAGE_FILE_REGEX = /\.(png|jpe?g|gif|svg|ico|webp|bmp|tiff?|avif|heic|heif|jfif|cur|psd|ai|eps|raw|cr2|nef|dng|xcf|sketch|fig)$/i;
-const BINARY_ASSET_REGEX = /\.(pdf|zip|tar|gz|7z|rar|mp3|mp4|mov|avi|mkv|webm|ttf|woff|woff2|eot|otf|bin|exe|dll|wav|ogg|flac|aac|lockb)$/i;
+const BINARY_ASSET_REGEX = /\.(pdf|zip|tar|gz|tgz|bz2|xz|zst|7z|rar|mp3|mp4|mov|avi|mkv|webm|m4a|m4v|ttf|woff|woff2|eot|otf|bin|exe|dll|so|dylib|o|a|lib|wasm|pyc|pyo|class|jar|war|apk|aab|ipa|dmg|iso|msi|deb|rpm|db|sqlite|sqlite3|docx?|xlsx?|pptx?|odt|ods|parquet|glb|gltf|fbx|blend|wav|ogg|flac|aac|lockb)$/i;
 const CODE_SCRIPT_FILE_REGEX = /\.(html?|css|s[ac]ss|less|styl|m?[jt]sx?|c[jt]s|gs|pyw?|rb|php|phtml|java|kts?|scala|go|rs|c|h|cpp|hpp|cc|cs|swift|dart|lua|pl|r|sh|bash|zsh|fish|ps1|bat|cmd|sql|graphql|gql|prisma|proto|vue|svelte|astro|jsonc?|ya?ml|toml|xml|ini|cfg|conf|md|mdx|ejs|hbs|pug|twig|liquid|webmanifest)$/i;
 const KNOWN_CODE_BASENAMES = new Set([
  'dockerfile', 'makefile', 'procfile', '.gitignore', '.gitattributes',
  '.npmrc', '.nvmrc', '.editorconfig', '.eslintrc', '.prettierrc',
  '.babelrc', '.browserslistrc', '.env.example', '.clasp.json'
 ]);
+const IGNORED_PATH_SEGMENTS = new Set([
+ 'node_modules', '.git', 'updater', 'coverage', '.next', '.nuxt',
+ '.svelte-kit', '.astro', '.cache', '.vite', '.parcel-cache', '.turbo',
+ '__pycache__', '.venv', 'venv', '.pytest_cache', '.mypy_cache'
+]);
+const IGNORED_LOCKFILE_BASENAMES = new Set([
+ 'bun.lock', 'bun.lockb', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
+ 'cargo.lock', 'poetry.lock', 'composer.lock', 'gemfile.lock', 'uv.lock'
+]);
+const BACKUP_SKIP_ARTIFACT_REGEX = /\.map$/i;
+const MAX_BACKUP_FILE_BYTES = 750 * 1024; // 750 KB ceiling per single file for Google Docs backups
 
 function isImageFilePath(filePath) {
  return IMAGE_FILE_REGEX.test(String(filePath || ''));
+}
+
+function hasIgnoredDirectorySegment(filePath) {
+ const segments = String(filePath || '').toLowerCase().split('/');
+ for (let i = 0; i < segments.length - 1; i++) {
+  if (IGNORED_PATH_SEGMENTS.has(segments[i])) return true;
+ }
+ return false;
+}
+
+function isLockfilePath(filePath) {
+ const baseName = String(filePath || '').split('/').pop().toLowerCase();
+ return IGNORED_LOCKFILE_BASENAMES.has(baseName);
 }
 
 function isCodeOrScriptFile(filePath) {
@@ -584,7 +761,6 @@ async function fetchRepoTree(repo, branch, token) {
 function computeTargetFilesToDelete(targetTree, sourceFiles, excludedList) {
  const sourcePathSet = new Set((sourceFiles || []).map(f => f.path));
  const excludedSet = new Set((excludedList || []).map(p => normalizeRepoFilePath(p).toLowerCase()).filter(Boolean));
- const protectedLockfiles = new Set(['bun.lock', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml']);
 
  const filesToDelete = [];
  let protectedImageCount = 0;
@@ -602,8 +778,8 @@ function computeTargetFilesToDelete(targetTree, sourceFiles, excludedList) {
 
      // Never delete workflows, protected directories, lockfiles, excluded files, or non-code binaries
      if (lowerPath.startsWith('.github/')) return;
-     if (lowerPath.startsWith('updater/') || lowerPath.startsWith('node_modules/')) return;
-     if (protectedLockfiles.has(lowerPath)) return;
+     if (hasIgnoredDirectorySegment(pathStr)) return;
+     if (isLockfilePath(pathStr)) return;
      if (excludedSet.has(lowerPath)) return;
      if (BINARY_ASSET_REGEX.test(pathStr)) return;
 
@@ -617,40 +793,273 @@ function computeTargetFilesToDelete(targetTree, sourceFiles, excludedList) {
  return { filesToDelete, protectedImageCount };
 }
 
-async function fetchAllRepoFiles(repo, branch, token) {
-const headers = { "Authorization": `Bearer ${token}` };
-const treeRes = await fetch(`https://api.github.com/repos/${repo}/git/trees/${branch}?recursive=1`, { headers });
-if (!treeRes.ok) throw await extractGitHubError(treeRes, `GitHub API Error: Could not fetch tree for branch '${branch}'`);
-
-const treeData = await treeRes.json();
-
-// Rigorous filter: Skip blobs that are non-text / binary (images, fonts, zips, media) and lockfiles
-const fileNodes = treeData.tree.filter(item => {
- if (item.type !== 'blob') return false;
- if (item.path.startsWith('updater/') || item.path.startsWith('node_modules/')) return false;
- if (['bun.lock', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'].includes(item.path)) return false;
- 
- if (isImageFilePath(item.path) || BINARY_ASSET_REGEX.test(item.path)) return false;
- 
- return true;
-});
-
-let compiledFiles = [];
-const batchSize = 10; 
-
-for (let i = 0; i < fileNodes.length; i += batchSize) {
- const batch = fileNodes.slice(i, i + batchSize);
- const promises = batch.map(async file => {
-     const contentRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${file.sha}`, {
-         headers: { ...headers, "Accept": "application/vnd.github.v3.raw" }
-     });
-     if (!contentRes.ok) throw await extractGitHubError(contentRes, `Failed to fetch raw blob for ${file.path}`);
-     return { path: file.path, content: await contentRes.text() };
- });
- compiledFiles.push(...(await Promise.all(promises)));
+async function fetchBlobTextWithRetry(repo, file, headers, maxRetries = 2) {
+ let lastErr = null;
+ for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  try {
+   const contentRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${file.sha}`, {
+    headers: { ...headers, "Accept": "application/vnd.github.v3.raw" }
+   });
+   if (contentRes.ok) {
+    return await contentRes.text();
+   }
+   lastErr = await extractGitHubError(contentRes, `Failed to fetch raw blob for ${file.path}`);
+   if (contentRes.status >= 500 || contentRes.status === 429) {
+    await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+    continue;
+   }
+   throw lastErr;
+  } catch (err) {
+   lastErr = err;
+   if (attempt < maxRetries && isNetworkFetchError(err)) {
+    await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+    continue;
+   }
+   throw err;
+  }
+ }
+ throw lastErr;
 }
 
-return { fileNodes, compiledFiles };
+async function fetchAllRepoFiles(repo, branch, token, options = {}) {
+ const { forBackup = false, onProgress = null } = options;
+ const headers = { "Authorization": `Bearer ${token}` };
+ const treeRes = await fetch(`https://api.github.com/repos/${repo}/git/trees/${branch}?recursive=1`, { headers });
+ if (!treeRes.ok) throw await extractGitHubError(treeRes, `GitHub API Error: Could not fetch tree for branch '${branch}'`);
+
+ const treeData = await treeRes.json();
+ const skippedFiles = [];
+
+ // Rigorous filter: Skip non-text / binary assets, lockfiles, ignored directories, and oversized backup files
+ const fileNodes = (treeData.tree || []).filter(item => {
+  if (item.type !== 'blob') return false;
+  if (hasIgnoredDirectorySegment(item.path)) return false;
+  if (isLockfilePath(item.path)) return false;
+  if (isImageFilePath(item.path) || BINARY_ASSET_REGEX.test(item.path)) return false;
+
+  if (forBackup) {
+   if (BACKUP_SKIP_ARTIFACT_REGEX.test(item.path)) {
+    skippedFiles.push({ path: item.path, reason: 'source map' });
+    return false;
+   }
+   if (typeof item.size === 'number' && item.size > MAX_BACKUP_FILE_BYTES) {
+    skippedFiles.push({ path: item.path, reason: `${formatFileSize(item.size)} exceeds single-file backup cap` });
+    return false;
+   }
+  }
+  return true;
+ });
+
+ let compiledFiles = [];
+ const batchSize = 12;
+ let fetchedCount = 0;
+
+ for (let i = 0; i < fileNodes.length; i += batchSize) {
+  const batch = fileNodes.slice(i, i + batchSize);
+  const promises = batch.map(async file => {
+   const text = await fetchBlobTextWithRetry(repo, file, headers);
+   if (forBackup && text.indexOf('\u0000') !== -1) {
+    skippedFiles.push({ path: file.path, reason: 'binary content detected' });
+    return null;
+   }
+   return { path: file.path, content: text };
+  });
+  const results = await Promise.all(promises);
+  results.forEach(item => {
+   if (item) compiledFiles.push(item);
+  });
+  fetchedCount = Math.min(fileNodes.length, i + batch.length);
+  if (typeof onProgress === 'function') {
+   onProgress(fetchedCount, fileNodes.length);
+  }
+ }
+
+ return { fileNodes, compiledFiles, skippedFiles };
+}
+
+function buildBackupChunks(files, maxChunkChars, maxFilesPerChunk) {
+ const chunks = [];
+ let current = [];
+ let currentChars = 0;
+
+ for (let i = 0; i < files.length; i++) {
+  const file = files[i];
+  const fileChars = (file.path ? file.path.length : 0) + (file.content ? file.content.length : 0) + 120;
+
+  if (current.length > 0 && (currentChars + fileChars > maxChunkChars || current.length >= maxFilesPerChunk)) {
+   chunks.push(current);
+   current = [];
+   currentChars = 0;
+  }
+  current.push(file);
+  currentChars += fileChars;
+
+  if (currentChars >= maxChunkChars) {
+   chunks.push(current);
+   current = [];
+   currentChars = 0;
+  }
+ }
+ if (current.length > 0) {
+  chunks.push(current);
+ }
+ return chunks;
+}
+
+function buildHierarchyWithNotes(fileNodes, skippedFiles) {
+ const lines = (fileNodes || []).map(f => f.path);
+ if (Array.isArray(skippedFiles) && skippedFiles.length > 0) {
+  lines.push('');
+  lines.push('--- Skipped Non-Code / Oversized Files ---');
+  skippedFiles.forEach(sf => lines.push(`[SKIPPED: ${sf.reason}] ${sf.path}`));
+ }
+ return lines.join('\n');
+}
+
+async function performDriveBackup({ gasUrl, folderId, repoName, backupName, hierarchy, files, onStatus }) {
+ const notify = (msg) => {
+  if (typeof onStatus === 'function') onStatus(msg);
+ };
+
+ // Chunked streaming limits for the upgraded backend/Code.js
+ const streamChunks = buildBackupChunks(files || [], 140000, 15);
+ const sessionNonce = Date.now().toString(36);
+
+ // 1. Try modern chunked streaming backup (backupStart -> backupAppend -> backupFinish)
+ let initialDoc = null;
+ let useLegacyFallback = false;
+
+ try {
+  notify(`Initializing Google Drive backup document for ${repoName}...`);
+  initialDoc = await gasCall(gasUrl, {
+   action: 'backupStart',
+   folderId,
+   hierarchy,
+   repoName,
+   backupName
+  }, { timeoutMs: 60000, retries: 2, allowRetry: true });
+ } catch (err) {
+  const errMsg = String(err && err.message ? err.message : '');
+  if (errMsg.includes('Invalid action')) {
+   useLegacyFallback = true;
+  } else {
+   throw err;
+  }
+ }
+
+ if (!useLegacyFallback && initialDoc && initialDoc.id) {
+  const createdDocs = [initialDoc];
+  let activeDoc = initialDoc;
+  let partNumber = 1;
+  let sentFiles = 0;
+  const totalFiles = (files || []).length;
+
+  for (let i = 0; i < streamChunks.length; i++) {
+   const chunk = streamChunks[i];
+   notify(`Transmitting ${repoName} backup to Google Drive (chunk ${i + 1}/${streamChunks.length}, ${sentFiles}/${totalFiles} files)...`);
+
+   let appendRes = await gasCall(gasUrl, {
+    action: 'backupAppend',
+    fileId: activeDoc.id,
+    files: chunk,
+    chunkKey: `${sessionNonce}_p${partNumber}_c${i}`
+   }, { timeoutMs: 90000, retries: 2, allowRetry: true });
+
+   // If Google Docs ~1.02M character limit is reached, automatically roll over to a Part N continuation doc
+   if (appendRes && appendRes.limitReached) {
+    try {
+     await gasCall(gasUrl, { action: 'backupFinish', fileId: activeDoc.id }, { timeoutMs: 30000, retries: 1 });
+    } catch (_) {}
+
+    partNumber++;
+    const nextName = `${backupName} (Part ${partNumber})`;
+    notify(`Document character limit reached. Creating continuation document (Part ${partNumber})...`);
+    activeDoc = await gasCall(gasUrl, {
+     action: 'backupStart',
+     folderId,
+     hierarchy: `(Continuation Part ${partNumber} of ${backupName})\n\n${hierarchy}`,
+     repoName,
+     backupName: nextName
+    }, { timeoutMs: 60000, retries: 2, allowRetry: true });
+    createdDocs.push(activeDoc);
+
+    appendRes = await gasCall(gasUrl, {
+     action: 'backupAppend',
+     fileId: activeDoc.id,
+     files: chunk,
+     chunkKey: `${sessionNonce}_p${partNumber}_c${i}`
+    }, { timeoutMs: 90000, retries: 2, allowRetry: true });
+
+    if (appendRes && appendRes.limitReached) {
+     throw new Error("A single file in this repository exceeds Google Docs' maximum document character limit.");
+    }
+   }
+
+   sentFiles += chunk.length;
+  }
+
+  notify(`Finalizing Google Drive backup (${totalFiles}/${totalFiles} files)...`);
+  try {
+   const finished = await gasCall(gasUrl, { action: 'backupFinish', fileId: activeDoc.id }, { timeoutMs: 30000, retries: 1 });
+   if (finished && finished.url) {
+    createdDocs[createdDocs.length - 1] = finished;
+   }
+  } catch (_) {}
+
+  const primary = createdDocs[0];
+  return {
+   url: primary.url,
+   id: primary.id,
+   name: primary.name || backupName,
+   parts: createdDocs,
+   usedLegacyFallback: false
+  };
+ }
+
+ // 2. Backward-compatible Legacy Fallback (when deployed GAS backend hasn't received chunked endpoints yet)
+ // Keep each legacy backupCode call small enough (<= 160 KB, <= 15 files) so GAS never times out or fails to fetch
+ const legacyBatches = buildBackupChunks(files || [], 160000, 15);
+ if (legacyBatches.length === 0) {
+  legacyBatches.push([]);
+ }
+ const createdDocs = [];
+ const totalParts = legacyBatches.length;
+
+ for (let i = 0; i < totalParts; i++) {
+  const partName = totalParts === 1 ? backupName : `${backupName} (Part ${i + 1}/${totalParts})`;
+  const partHierarchy = totalParts === 1
+   ? hierarchy
+   : `(Part ${i + 1} of ${totalParts})\n${hierarchy}`;
+  notify(
+   totalParts === 1
+    ? `Transmitting ${repoName} backup to Google Drive (${files.length} files)...`
+    : `Transmitting ${repoName} backup to Google Drive (Part ${i + 1}/${totalParts})...`
+  );
+
+  const partRes = await gasCall(gasUrl, {
+   action: 'backupCode',
+   folderId,
+   hierarchy: partHierarchy,
+   files: legacyBatches[i],
+   repoName,
+   backupName: partName
+  }, { timeoutMs: 110000, retries: 1, allowRetry: false });
+
+  createdDocs.push({
+   url: partRes.url,
+   id: partRes.id || null,
+   name: partRes.name || partName
+  });
+ }
+
+ const primary = createdDocs[0];
+ return {
+  url: primary.url,
+  id: primary.id,
+  name: primary.name || backupName,
+  parts: createdDocs,
+  usedLegacyFallback: true
+ };
 }
 
 async function pushCommitToGitHub(repo, branch, token, files, commitMessage, filesToDelete = []) {
@@ -996,16 +1405,20 @@ try {
      setStatus("Fetching full repository tree to create a Drive backup...", "info");
      updateBtnText.textContent = "Step 1/2: Backing up repo...";
      
-     const { fileNodes, compiledFiles } = await fetchAllRepoFiles(config.repo, config.branch, config.token);
-     const hierarchy = fileNodes.map(f => f.path).join('\n');
+     const { fileNodes, compiledFiles, skippedFiles } = await fetchAllRepoFiles(config.repo, config.branch, config.token, {
+         forBackup: true,
+         onProgress: (done, total) => setStatus(`Fetching repository files for backup (${done}/${total})...`, "info")
+     });
+     const hierarchy = buildHierarchyWithNotes(fileNodes, skippedFiles);
      
-     const backupData = await gasCall(config.gasUrl, {
-         action: 'backupCode',
+     const backupData = await performDriveBackup({
+         gasUrl: config.gasUrl,
          folderId: config.folderId,
+         repoName: repoNameStr,
+         backupName: customBackupName,
          hierarchy,
          files: compiledFiles,
-         repoName: repoNameStr,
-         backupName: customBackupName
+         onStatus: (msg) => setStatus(msg, "info")
      });
      backupUrl = backupData.url;
      backupId = backupData.id || null;
@@ -1060,20 +1473,25 @@ try {
  btnText.textContent = "Backing up repository...";
  setStatus("Fetching full repository tree to create a manual Drive backup...", "info");
  
- const { fileNodes, compiledFiles } = await fetchAllRepoFiles(config.repo, config.branch, config.token);
- const hierarchy = fileNodes.map(f => f.path).join('\n');
+ const { fileNodes, compiledFiles, skippedFiles } = await fetchAllRepoFiles(config.repo, config.branch, config.token, {
+     forBackup: true,
+     onProgress: (done, total) => setStatus(`Fetching repository files for manual backup (${done}/${total})...`, "info")
+ });
+ const hierarchy = buildHierarchyWithNotes(fileNodes, skippedFiles);
  
- const backupData = await gasCall(config.gasUrl, {
-     action: 'backupCode',
+ const backupData = await performDriveBackup({
+     gasUrl: config.gasUrl,
      folderId: config.folderId,
+     repoName: repoNameStr,
+     backupName: customBackupName,
      hierarchy,
      files: compiledFiles,
-     repoName: repoNameStr,
-     backupName: customBackupName
+     onStatus: (msg) => setStatus(msg, "info")
  });
  const createdName = backupData.name || customBackupName;
+ const skippedNote = skippedFiles.length > 0 ? ` (${skippedFiles.length} oversized/binary file${skippedFiles.length === 1 ? '' : 's'} skipped)` : '';
  
- setStatus(`Manual Backup "${escapeHtmlAttr(createdName)}" successful! ${generateBackupLinkHtml(backupData.url, "View on Google Drive &nearr;", backupData.id, createdName)}`, "success");
+ setStatus(`Manual Backup "${escapeHtmlAttr(createdName)}" successful!${skippedNote} ${generateBackupLinksHtml(backupData, "View on Google Drive &nearr;")}`, "success");
  
 } catch(err) {
  setStatus(err.message, "error");
@@ -1928,17 +2346,20 @@ promoteBtn.addEventListener('click', async () => {
         if (!skipTargetBackup) {
             setStatus(`Fetching target files to backup ${targetRepo}...`, 'info');
             btnText.textContent = `Step 2/${totalSteps}: Backing up Target...`;
-            const { fileNodes: targetNodes, compiledFiles: targetFiles } = await fetchAllRepoFiles(targetRepo, branch, token);
-            const hierarchy = targetNodes.map(f => f.path).join('\n');
+            const { fileNodes: targetNodes, compiledFiles: targetFiles, skippedFiles } = await fetchAllRepoFiles(targetRepo, branch, token, {
+                forBackup: true,
+                onProgress: (done, total) => setStatus(`Fetching target files for backup (${done}/${total})...`, 'info')
+            });
+            const hierarchy = buildHierarchyWithNotes(targetNodes, skippedFiles);
 
-            setStatus(`Transmitting ${targetRepo} backup to Google Drive...`, 'info');
-            const backupData = await gasCall(GAS_WEB_APP_URL, {
-                action: 'backupCode',
+            const backupData = await performDriveBackup({
+                gasUrl: GAS_WEB_APP_URL,
                 folderId,
+                repoName: targetRepoNameStr,
+                backupName: customBackupName,
                 hierarchy,
                 files: targetFiles,
-                repoName: targetRepoNameStr,
-                backupName: customBackupName
+                onStatus: (msg) => setStatus(msg, 'info')
             });
             backupUrl = backupData.url || null;
             backupId = backupData.id || null;
@@ -2031,22 +2452,25 @@ try {
  btnText.textContent = `Backing up ${APP_NAME}...`;
  setStatus(`Fetching repository tree for ${targetRepo}...`, "info");
  
- const { fileNodes, compiledFiles } = await fetchAllRepoFiles(targetRepo, targetBranch, token);
- const hierarchy = fileNodes.map(f => f.path).join('\n');
- 
- setStatus("Compiling files and securely transmitting to Google Drive...", "info");
+ const { fileNodes, compiledFiles, skippedFiles } = await fetchAllRepoFiles(targetRepo, targetBranch, token, {
+     forBackup: true,
+     onProgress: (done, total) => setStatus(`Fetching system repository files (${done}/${total})...`, "info")
+ });
+ const hierarchy = buildHierarchyWithNotes(fileNodes, skippedFiles);
 
- const backupData = await gasCall(GAS_WEB_APP_URL, { 
-     action: 'backupCode', 
-     folderId: targetFolderId, 
-     hierarchy, 
-     files: compiledFiles, 
+ const backupData = await performDriveBackup({
+     gasUrl: GAS_WEB_APP_URL,
+     folderId: targetFolderId,
      repoName: repoNameStr,
-     backupName: customBackupName
+     backupName: customBackupName,
+     hierarchy,
+     files: compiledFiles,
+     onStatus: (msg) => setStatus(msg, "info")
  });
  const createdName = backupData.name || customBackupName;
+ const skippedNote = skippedFiles.length > 0 ? ` (${skippedFiles.length} oversized/binary file${skippedFiles.length === 1 ? '' : 's'} skipped)` : '';
  
- setStatus(`System Tool Backup "${escapeHtmlAttr(createdName)}" successful! ${generateBackupLinkHtml(backupData.url, "View on Google Drive &nearr;", backupData.id, createdName)}`, "success");
+ setStatus(`System Tool Backup "${escapeHtmlAttr(createdName)}" successful!${skippedNote} ${generateBackupLinksHtml(backupData, "View on Google Drive &nearr;")}`, "success");
  
 } catch(err) {
  setStatus("System Backup Error: " + err.message, "error");

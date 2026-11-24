@@ -11,6 +11,12 @@ function doPost(e) {
 
     if (action === 'backupCode') {
       result = handleBackup(params);
+    } else if (action === 'backupStart') {
+      result = handleBackupStart(params);
+    } else if (action === 'backupAppend') {
+      result = handleBackupAppend(params);
+    } else if (action === 'backupFinish') {
+      result = handleBackupFinish(params);
     } else if (action === 'renameBackup') {
       result = handleRenameBackup(params);
     } else if (action === 'getBackups') {
@@ -40,6 +46,164 @@ function doOptions(e) {
     .setMimeType(ContentService.MimeType.TEXT);
 }
 
+var MAX_DOC_CHARS = 950000; // Safe ceiling below Google Docs ~1.02M character limit
+var MAX_PARAGRAPH_CHARS = 45000; // Fast batched paragraph size for DocumentApp
+
+function sanitizeDocText(value) {
+  if (value === null || value === undefined) return "";
+  return String(value)
+    .replace(/\r\n|\r/g, '\n')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+}
+
+function formatFilesBlock(files) {
+  const parts = [];
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const safePath = sanitizeDocText(file && file.path ? file.path : "unknown");
+    const safeContent = sanitizeDocText(file && file.content !== undefined ? file.content : "");
+    parts.push(
+      `@@@===FILE_PATH: ${safePath} ===@@@\n` +
+      `@@@===CODE_START===@@@\n` +
+      `${safeContent}\n` +
+      `@@@===CODE_END===@@@\n`
+    );
+  }
+  return parts.join("\n");
+}
+
+function appendTextInBatches(body, text) {
+  if (!text) return;
+  let offset = 0;
+  const totalLen = text.length;
+  while (offset < totalLen) {
+    let end = Math.min(offset + MAX_PARAGRAPH_CHARS, totalLen);
+    if (end < totalLen) {
+      const lastNewline = text.lastIndexOf('\n', end);
+      if (lastNewline > offset + 1000) {
+        end = lastNewline;
+      }
+    }
+    const segment = text.slice(offset, end);
+    body.appendParagraph(segment);
+    offset = end;
+    if (offset < totalLen && text.charAt(offset) === '\n') {
+      offset++;
+    }
+  }
+}
+
+function trySetPublicViewSharing(driveFile) {
+  try {
+    driveFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  } catch (e) {
+    // Non-fatal: Workspace domains may restrict ANYONE_WITH_LINK sharing
+  }
+}
+
+function handleBackupStart(params) {
+  const folderId = params.folderId;
+  const hierarchy = params.hierarchy;
+  const repoName = params.repoName || "App";
+  const customBackupName = params.backupName ? String(params.backupName).trim() : "";
+
+  if (!folderId) {
+    throw new Error("Missing required parameter: folderId.");
+  }
+
+  const folder = DriveApp.getFolderById(folderId);
+  const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+  const docName = customBackupName || `${repoName} Code Backup - ${dateStr}`;
+
+  const doc = DocumentApp.create(docName);
+  const fileId = doc.getId();
+
+  // Move into target folder immediately so interrupted uploads never pollute Drive root
+  const driveFile = DriveApp.getFileById(fileId);
+  driveFile.moveTo(folder);
+
+  const body = doc.getBody();
+  body.insertParagraph(0, `--- START OF FILE ${docName} ---`);
+  const headerBlock =
+    "#####*****\nFull File Hierarchy\n#####*****\n" +
+    sanitizeDocText(hierarchy || "No hierarchy provided.") + "\n";
+  appendTextInBatches(body, headerBlock);
+
+  doc.saveAndClose();
+  trySetPublicViewSharing(driveFile);
+
+  return {
+    url: driveFile.getUrl(),
+    id: fileId,
+    name: docName
+  };
+}
+
+function handleBackupAppend(params) {
+  const fileId = params.fileId;
+  const files = params.files;
+  const chunkKey = params.chunkKey ? String(params.chunkKey) : "";
+
+  if (!fileId || !Array.isArray(files)) {
+    throw new Error("Missing required parameters: fileId or files.");
+  }
+
+  // Idempotency guard so network retries never duplicate content
+  const cacheKey = chunkKey ? `acm_bk_${fileId}_${chunkKey}` : null;
+  if (cacheKey) {
+    try {
+      const cache = CacheService.getScriptCache();
+      if (cache.get(cacheKey)) {
+        return { id: fileId, appended: 0, deduplicated: true };
+      }
+    } catch (e) {}
+  }
+
+  const chunkText = formatFilesBlock(files);
+  const doc = DocumentApp.openById(fileId);
+  const body = doc.getBody();
+  const currentLength = body.getText().length;
+
+  if (currentLength + chunkText.length > MAX_DOC_CHARS) {
+    doc.saveAndClose();
+    return {
+      id: fileId,
+      limitReached: true,
+      currentLength: currentLength,
+      chunkLength: chunkText.length
+    };
+  }
+
+  appendTextInBatches(body, chunkText);
+  doc.saveAndClose();
+
+  if (cacheKey) {
+    try {
+      CacheService.getScriptCache().put(cacheKey, '1', 600);
+    } catch (e) {}
+  }
+
+  return {
+    id: fileId,
+    appended: files.length,
+    totalLength: currentLength + chunkText.length
+  };
+}
+
+function handleBackupFinish(params) {
+  const fileId = params.fileId;
+  if (!fileId) {
+    throw new Error("Missing required parameter: fileId.");
+  }
+  const driveFile = DriveApp.getFileById(fileId);
+  trySetPublicViewSharing(driveFile);
+  return {
+    url: driveFile.getUrl(),
+    id: driveFile.getId(),
+    name: driveFile.getName()
+  };
+}
+
 function handleBackup(params) {
   const folderId = params.folderId;
   const hierarchy = params.hierarchy;
@@ -58,30 +222,31 @@ function handleBackup(params) {
   // Use user-supplied backupName if provided, otherwise use the default naming convention
   const docName = customBackupName || `${repoName} Code Backup - ${dateStr}`;
 
+  const headerBlock =
+    "#####*****\nFull File Hierarchy\n#####*****\n" +
+    sanitizeDocText(hierarchy || "No hierarchy provided.") + "\n";
+  const filesBlock = formatFilesBlock(files);
+
+  if (headerBlock.length + filesBlock.length > MAX_DOC_CHARS) {
+    throw new Error("Backup content exceeds single Google Doc character limit. Please use chunked backup.");
+  }
+
   const doc = DocumentApp.create(docName);
   const fileId = doc.getId();
-  const body = doc.getBody();
 
-  body.insertParagraph(0, `--- START OF FILE ${docName} ---`);
-  body.appendParagraph("#####*****\nFull File Hierarchy\n#####*****");
-  body.appendParagraph(hierarchy || "No hierarchy provided.");
-  body.appendParagraph("\n");
-
-  files.forEach(file => {
-    body.appendParagraph(`@@@===FILE_PATH: ${file.path} ===@@@`);
-    body.appendParagraph("@@@===CODE_START===@@@");
-    body.appendParagraph(file.content);
-    body.appendParagraph("@@@===CODE_END===@@@\n\n");
-  });
-
-  doc.saveAndClose();
-
-  // Move the newly created document to the designated Drive folder
+  // Move the newly created document to the designated Drive folder immediately
   const driveFile = DriveApp.getFileById(fileId);
   driveFile.moveTo(folder);
 
+  const body = doc.getBody();
+  body.insertParagraph(0, `--- START OF FILE ${docName} ---`);
+  appendTextInBatches(body, headerBlock);
+  appendTextInBatches(body, filesBlock);
+
+  doc.saveAndClose();
+
   // Ensure the backup file has permissions set to anyone with the link can view
-  driveFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  trySetPublicViewSharing(driveFile);
 
   return {
     url: driveFile.getUrl(),
